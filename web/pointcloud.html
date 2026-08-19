@@ -160,6 +160,7 @@
       void main() {
         vec3 p = aPosition - uCenter;
         p.y = -p.y;
+        p.z = -p.z;
         float cy = cos(uYaw), sy = sin(uYaw);
         float x1 = cy * p.x + sy * p.z;
         float z1 = -sy * p.x + cy * p.z;
@@ -441,7 +442,7 @@
     function projectPosition(point) {
       let x = point[0] - center[0];
       let y = -(point[1] - center[1]);
-      let z = point[2] - center[2];
+      let z = -(point[2] - center[2]);
       const cy = Math.cos(yaw), sy = Math.sin(yaw);
       const x1 = cy * x + sy * z;
       const z1 = -sy * x + cy * z;

@@ -10,6 +10,7 @@ from rgbd_collector.pointcloud import (
     POINT_DTYPE,
     encode_point_cloud,
     frame_summaries,
+    pixel_to_point,
     reconstruct_frame,
     session_summaries,
 )
@@ -92,6 +93,41 @@ class PointCloudTests(unittest.TestCase):
         self.assertTrue(
             np.any(np.all(points["rgba"][:, :3] == [102, 187, 106], axis=1))
         )
+
+    def test_rgb_pixel_projects_to_same_point_cloud_coordinates(self) -> None:
+        result = pixel_to_point(
+            self.root,
+            self.session.session_id,
+            self.frame_id,
+            u=4,
+            v=3,
+            search_radius=0,
+            min_depth_m=0.1,
+            max_depth_m=2.0,
+        )
+        expected = [
+            (4 - 4.5) * 1.001 / 5.0,
+            (3 - 3.5) * 1.001 / 5.0,
+            1.001,
+        ]
+        np.testing.assert_allclose(
+            result["point_camera_m"], expected, atol=1e-7
+        )
+        self.assertEqual(result["used_pixel"], {"u": 4, "v": 3})
+
+    def test_rgb_pixel_uses_nearest_valid_aligned_depth(self) -> None:
+        result = pixel_to_point(
+            self.root,
+            self.session.session_id,
+            self.frame_id,
+            u=0,
+            v=0,
+            search_radius=3,
+            min_depth_m=0.1,
+            max_depth_m=2.0,
+        )
+        self.assertEqual(result["used_pixel"], {"u": 2, "v": 1})
+        self.assertAlmostEqual(result["search_distance_px"], np.sqrt(5))
 
 
 if __name__ == "__main__":

@@ -252,6 +252,8 @@ def save_annotation(
     target_camera_m: list[float],
     plane: dict[str, Any],
     yolo: dict[str, Any] | None = None,
+    target_pixel: dict[str, Any] | None = None,
+    selection_source: str = "pointcloud",
 ) -> dict[str, Any]:
     _, frame_dir = resolve_frame_paths(data_root, session_id, frame_id)
     if not frame_dir.is_dir():
@@ -261,6 +263,8 @@ def save_annotation(
         raise ValueError("目标点必须是三个有限数值")
     if target[2] <= 0:
         raise ValueError("目标点深度必须大于零")
+    if selection_source not in {"pointcloud", "rgb"}:
+        raise ValueError("selection_source 必须是 pointcloud 或 rgb")
 
     record = {
         "schema": "rgbd-target-annotation/v1",
@@ -268,12 +272,18 @@ def save_annotation(
         "frame_id": frame_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "target_camera_m": target.tolist(),
+        "selection_source": selection_source,
         "target_plane_coordinates_m": target_plane_coordinates(
             target.tolist(), plane
         ),
         "plane": plane,
         "yolo": yolo or {"available": False, "boxes": []},
     }
+    if target_pixel is not None:
+        record["target_pixel"] = {
+            "u": int(target_pixel["u"]),
+            "v": int(target_pixel["v"]),
+        }
     clusters = record["yolo"].get("clusters", [])
     if clusters:
         reference = min(

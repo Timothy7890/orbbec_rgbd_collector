@@ -272,6 +272,113 @@ def reconstruct_frame(
     return points, metadata
 
 
+def pixel_to_point(
+    data_root: Path,
+    session_id: str,
+    frame_id: str,
+    *,
+    u: int,
+    v: int,
+    search_radius: int = 6,
+    min_depth_m: float = 0.1,
+    max_depth_m: float = 5.0,
+) -> dict[str, Any]:
+    if not 0 <= search_radius <= 50:
+        raise ValueError("search_radius 必须在 0~50")
+    if not 0 <= min_depth_m < max_depth_m <= 100:
+        raise ValueError("深度范围非法")
+    session_dir, frame_dir = resolve_frame_paths(
+        data_root, session_id, frame_id
+    )
+    session_file = session_dir / "session.json"
+    frame_file = frame_dir / "frame.json"
+    if not session_file.is_file() or not frame_file.is_file():
+        raise FileNotFoundError("会话或帧元数据不存在")
+    session = json.loads(session_file.read_text(encoding="utf-8"))
+    frame_meta = json.loads(frame_file.read_text(encoding="utf-8"))
+    depth = cv2.imread(
+        str(frame_dir / "depth_aligned.png"), cv2.IMREAD_UNCHANGED
+    )
+    if depth is None:
+        raise FileNotFoundError("对齐深度文件不存在/无法解码")
+    if depth.dtype != np.uint16 or depth.ndim != 2:
+        raise ValueError("对齐深度必须是 uint16 单通道")
+    height, width = depth.shape
+    if not (0 <= u < width and 0 <= v < height):
+        raise ValueError(f"像素超出图像范围: ({u}, {v}) / {width}x{height}")
+
+    try:
+        scale_mm = float(frame_meta["depth_scale"]["value"])
+        intrinsics = session["camera"]["color"]["intrinsics"]
+        fx = float(intrinsics["fx"])
+        fy = float(intrinsics["fy"])
+        cx = float(intrinsics["cx"])
+        cy = float(intrinsics["cy"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("元数据缺少有效深度尺度或彩色相机内参") from exc
+    if fx <= 0 or fy <= 0 or scale_mm <= 0:
+        raise ValueError("深度尺度和相机焦距必须为正数")
+
+    x0, x1 = max(0, u - search_radius), min(width, u + search_radius + 1)
+    y0, y1 = max(0, v - search_radius), min(height, v + search_radius + 1)
+    patch = depth[y0:y1, x0:x1]
+    patch_m = patch.astype(np.float64) * (scale_mm / 1000.0)
+    valid = (
+        (patch > 0)
+        & np.isfinite(patch_m)
+        & (patch_m >= min_depth_m)
+        & (patch_m <= max_depth_m)
+    )
+    ys, xs = np.nonzero(valid)
+    if xs.size == 0:
+        raise ValueError(
+            f"点击像素附近 {search_radius}px 内没有有效对齐深度"
+        )
+    used_u = xs + x0
+    used_v = ys + y0
+    distance2 = (used_u - u) ** 2 + (used_v - v) ** 2
+    nearest = int(np.argmin(distance2))
+    actual_u = int(used_u[nearest])
+    actual_v = int(used_v[nearest])
+    z = float(depth[actual_v, actual_u]) * (scale_mm / 1000.0)
+
+    distortion = (
+        session.get("camera", {})
+        .get("color", {})
+        .get("distortion", {})
+        .get("coefficients", [])
+    )
+    try:
+        coefficients = np.asarray(distortion, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError):
+        coefficients = np.zeros(0, dtype=np.float64)
+    compensated = bool(
+        coefficients.size in {4, 5, 8, 12, 14}
+        and np.any(np.abs(coefficients) > 1e-12)
+    )
+    if compensated:
+        normalized = cv2.undistortPoints(
+            np.array([[[actual_u, actual_v]]], dtype=np.float64),
+            np.array(
+                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
+            ),
+            coefficients,
+        ).reshape(2)
+        x, y = float(normalized[0] * z), float(normalized[1] * z)
+    else:
+        x = (actual_u - cx) * z / fx
+        y = (actual_v - cy) * z / fy
+    return {
+        "requested_pixel": {"u": u, "v": v},
+        "used_pixel": {"u": actual_u, "v": actual_v},
+        "search_distance_px": float(math.sqrt(float(distance2[nearest]))),
+        "point_camera_m": [x, y, z],
+        "depth_m": z,
+        "image_size": {"width": width, "height": height},
+        "color_distortion_compensated": compensated,
+    }
+
+
 def encode_point_cloud(points: np.ndarray) -> bytes:
     if points.dtype != POINT_DTYPE:
         raise ValueError("unexpected point dtype")

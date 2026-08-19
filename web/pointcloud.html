@@ -63,6 +63,7 @@
     }
     .stage { position: relative; min-width: 0; background: #040609; }
     canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+    .stage.rgb-open canvas { width: 54%; }
     canvas:active { cursor: grabbing; }
     .hud {
       position: absolute; left: 14px; bottom: 12px; padding: 7px 10px;
@@ -75,11 +76,47 @@
       border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(255,107,114,.28);
       transform: translate(-50%, -50%); pointer-events: none; display: none;
     }
+    .rgb-picker {
+      position: absolute; z-index: 5; top: 14px; right: 14px;
+      width: calc(46% - 21px); min-width: 360px; padding: 10px;
+      border: 1px solid var(--line); border-radius: 10px;
+      background: rgba(13,17,24,.96); box-shadow: 0 12px 40px rgba(0,0,0,.45);
+      max-height: calc(100% - 28px); overflow-y: auto;
+    }
+    .rgb-picker[hidden] { display: none; }
+    .rgb-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin-bottom: 8px;
+    }
+    .rgb-head button { width: auto; padding: 5px 10px; margin-top: 0; }
+    .rgb-image-wrap { position: relative; width: 100%; line-height: 0; }
+    .rgb-image-wrap img {
+      display: block; width: 100%; height: auto;
+      background: #05070a; cursor: crosshair;
+    }
+    .rgb-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .rgb-box {
+      position: absolute; border: 2px solid var(--green);
+      color: #07130e; background: transparent;
+    }
+    .rgb-box span {
+      position: absolute; left: -2px; top: -20px; padding: 2px 5px;
+      background: var(--green); font: 11px/1.35 sans-serif; white-space: nowrap;
+    }
+    .rgb-dot {
+      position: absolute; width: 15px; height: 15px; border-radius: 50%;
+      border: 2px solid white; background: var(--red);
+      box-shadow: 0 0 0 3px rgba(255,107,114,.3);
+      transform: translate(-50%, -50%);
+    }
+    .rgb-foot { margin-top: 7px; color: var(--muted); font-size: 12px; }
     @media (max-width: 760px) {
       body { overflow: auto; }
       .layout { display: flex; flex-direction: column; height: auto; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .stage { height: 65vh; }
+      .stage.rgb-open canvas { width: 100%; }
+      .rgb-picker { min-width: 0; width: calc(100% - 20px); right: 10px; top: 10px; }
     }
   </style>
 </head>
@@ -125,6 +162,7 @@
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="pickBtn" class="secondary">点选三维目标</button>
+      <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
       <button id="resetBtn" class="secondary">重置视角</button>
@@ -134,10 +172,21 @@
         H/L 切换上一/下一帧。左键拖动旋转，滚轮缩放。先分析柜面，再点“点选三维目标”，在点云中单击目标。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
-    <section class="stage">
+    <section id="stage" class="stage">
       <canvas id="canvas"></canvas>
       <div id="hud" class="hud">0 points</div>
       <div id="targetMarker" class="target-marker"></div>
+      <div id="rgbPicker" class="rgb-picker" hidden>
+        <div class="rgb-head">
+          <strong>RGB 选点</strong>
+          <button id="closeRgbBtn" class="secondary">关闭</button>
+        </div>
+        <div id="rgbImageWrap" class="rgb-image-wrap">
+          <img id="rgbImage" alt="当前帧 RGB">
+          <div id="rgbOverlay" class="rgb-overlay"></div>
+        </div>
+        <div id="rgbFoot" class="rgb-foot">单击 RGB 像素，将由对齐深度换算成三维点。</div>
+      </div>
     </section>
   </div>
 
@@ -219,6 +268,7 @@
     let center = [0, 0, 0], radius = 1;
     let yaw = 0, pitch = 0, distance = 2;
     let selectedTarget = null, currentAnalysis = null, pickMode = false;
+    let selectedPixel = null, selectionSource = "pointcloud";
 
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
@@ -332,9 +382,12 @@
       setStatus(`${pointCount.toLocaleString()} 个点`, false,
         `${session}<br>${frame}<br>包围半径 ${radius.toFixed(3)} m`);
       selectedTarget = null;
+      selectedPixel = null;
+      selectionSource = "pointcloud";
       currentAnalysis = null;
       setPickMode(false);
       await loadSavedAnnotation();
+      if (!$("rgbPicker").hidden) await loadRgbImage();
     }
 
     function analysisOptions() {
@@ -359,6 +412,7 @@
       );
       currentAnalysis = data.analysis;
       updateAnalysisPanel();
+      renderRgbOverlay();
       setStatus("分析完成", false,
         `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
         `YOLO ${currentAnalysis.yolo.boxes.length} 个框`);
@@ -376,6 +430,8 @@
           body: JSON.stringify({
             ...analysisOptions(),
             target_camera_m: selectedTarget,
+            target_pixel: selectedPixel,
+            selection_source: selectionSource,
           }),
         }
       );
@@ -384,6 +440,8 @@
         yolo: data.annotation.yolo,
       };
       selectedTarget = data.annotation.target_camera_m;
+      selectedPixel = data.annotation.target_pixel || selectedPixel;
+      selectionSource = data.annotation.selection_source || selectionSource;
       updateAnalysisPanel(
         data.annotation.target_plane_coordinates_m,
         true,
@@ -401,6 +459,8 @@
       const saved = (data.annotations || []).find(item => item.frame_id === frame);
       if (saved) {
         selectedTarget = saved.target_camera_m;
+        selectedPixel = saved.target_pixel || null;
+        selectionSource = saved.selection_source || "pointcloud";
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
         updateAnalysisPanel(
           saved.target_plane_coordinates_m,
@@ -410,13 +470,18 @@
       } else {
         updateAnalysisPanel();
       }
+      renderRgbOverlay();
     }
 
     function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
       $("saveBtn").disabled = !selectedTarget;
       const lines = [];
-      if (selectedTarget)
+      if (selectedTarget) {
         lines.push(`目标相机系 m: ${selectedTarget.map(v => v.toFixed(4)).join(", ")}`);
+        lines.push(`选点来源: ${selectionSource === "rgb" ? "RGB 像素" : "三维点云"}`);
+      }
+      if (selectedPixel)
+        lines.push(`RGB 像素: (${selectedPixel.u}, ${selectedPixel.v})`);
       if (currentAnalysis?.plane) {
         const p = currentAnalysis.plane;
         lines.push(`柜面法向: ${p.normal_camera.map(v => v.toFixed(4)).join(", ")}`);
@@ -437,6 +502,96 @@
       $("pickBtn").className = active ? "secondary pick-active" : "secondary";
       $("pickBtn").textContent = active ? "请在点云中单击目标…" : "点选三维目标";
       canvas.style.cursor = active ? "crosshair" : "grab";
+    }
+
+    async function openRgbPicker() {
+      if (!$("session").value || !$("frame").value)
+        throw new Error("请先选择会话和帧");
+      $("rgbPicker").hidden = false;
+      $("stage").classList.add("rgb-open");
+      await loadRgbImage();
+    }
+
+    async function loadRgbImage() {
+      const session = $("session").value, frame = $("frame").value;
+      if (!session || !frame) return;
+      const image = $("rgbImage");
+      const loaded = new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("RGB 图加载失败"));
+      });
+      image.src = `/api/rgb/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?t=${Date.now()}`;
+      await loaded;
+      renderRgbOverlay();
+      $("rgbFoot").textContent =
+        `${image.naturalWidth}×${image.naturalHeight} · 单击像素选择对应三维点`;
+    }
+
+    function renderRgbOverlay() {
+      const overlay = $("rgbOverlay");
+      const image = $("rgbImage");
+      overlay.replaceChildren();
+      if (!image.naturalWidth || !image.naturalHeight) return;
+      for (const box of currentAnalysis?.yolo?.boxes || []) {
+        const [x1, y1, x2, y2] = box.xyxy;
+        const element = document.createElement("div");
+        element.className = "rgb-box";
+        element.style.left = `${x1 / image.naturalWidth * 100}%`;
+        element.style.top = `${y1 / image.naturalHeight * 100}%`;
+        element.style.width = `${(x2 - x1) / image.naturalWidth * 100}%`;
+        element.style.height = `${(y2 - y1) / image.naturalHeight * 100}%`;
+        const label = document.createElement("span");
+        label.textContent = `${box.name} ${(box.conf * 100).toFixed(0)}%`;
+        element.appendChild(label);
+        overlay.appendChild(element);
+      }
+      if (selectedPixel) {
+        const dot = document.createElement("div");
+        dot.className = "rgb-dot";
+        dot.style.left = `${selectedPixel.u / image.naturalWidth * 100}%`;
+        dot.style.top = `${selectedPixel.v / image.naturalHeight * 100}%`;
+        overlay.appendChild(dot);
+      }
+    }
+
+    async function selectRgbPixel(event) {
+      const image = $("rgbImage");
+      const rect = image.getBoundingClientRect();
+      const u = Math.max(0, Math.min(
+        image.naturalWidth - 1,
+        Math.round((event.clientX - rect.left) / rect.width * image.naturalWidth)
+      ));
+      const v = Math.max(0, Math.min(
+        image.naturalHeight - 1,
+        Math.round((event.clientY - rect.top) / rect.height * image.naturalHeight)
+      ));
+      const session = $("session").value, frame = $("frame").value;
+      $("rgbFoot").textContent = `正在读取像素 (${u}, ${v}) 的对齐深度…`;
+      const data = await json(
+        `/api/pixel-to-point/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            u, v, search_radius: 6,
+            min_depth_m: Number($("minDepth").value),
+            max_depth_m: Number($("maxDepth").value),
+          }),
+        }
+      );
+      selectedTarget = data.point_camera_m;
+      selectedPixel = data.used_pixel;
+      selectionSource = "rgb";
+      setPickMode(false);
+      updateAnalysisPanel();
+      renderRgbOverlay();
+      const shifted = data.search_distance_px > 0
+        ? `，邻近有效像素 (${data.used_pixel.u}, ${data.used_pixel.v})`
+        : "";
+      $("rgbFoot").textContent =
+        `深度 ${(data.depth_m * 1000).toFixed(1)} mm${shifted}`;
+      setStatus("已从 RGB 选择三维目标", false,
+        data.point_camera_m.map(value => value.toFixed(4)).join(", ") + " m");
     }
 
     function projectPosition(point) {
@@ -485,7 +640,10 @@
       }
       if (!best) throw new Error("点击位置附近没有点，请增大点大小或调整视角");
       selectedTarget = best;
+      selectedPixel = null;
+      selectionSource = "pointcloud";
       updateAnalysisPanel();
+      renderRgbOverlay();
       setPickMode(false);
       setStatus("已点选三维目标", false, best.map(v => v.toFixed(4)).join(", ") + " m");
     }
@@ -524,6 +682,16 @@
     $("semantic").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
     $("pickBtn").onclick = () => setPickMode(!pickMode);
+    $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
+    $("closeRgbBtn").onclick = () => {
+      $("rgbPicker").hidden = true;
+      $("stage").classList.remove("rgb-open");
+    };
+    $("rgbImage").onclick = event =>
+      selectRgbPixel(event).catch(error => {
+        $("rgbFoot").textContent = error.message;
+        setStatus(error.message, true);
+      });
     $("saveBtn").onclick = () => saveCurrentAnnotation().catch(e => setStatus(e.message, true));
     $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
     $("resetBtn").onclick = resetView;

@@ -11,7 +11,9 @@ from .offline_yolo import OfflineYolo
 from .pointcloud import (
     encode_point_cloud,
     frame_summaries,
+    pixel_to_point,
     reconstruct_frame,
+    resolve_frame_paths,
     session_summaries,
 )
 
@@ -50,6 +52,50 @@ def create_pointcloud_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "session_id": session_id, "frames": items}
+
+    @app.get("/api/rgb/{session_id}/{frame_id}")
+    def rgb_frame(session_id: str, frame_id: str):
+        try:
+            _, frame_dir = resolve_frame_paths(root, session_id, frame_id)
+            color_path = frame_dir / "color.jpg"
+            if not color_path.is_file():
+                raise FileNotFoundError("RGB 图不存在")
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return FileResponse(
+            color_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/pixel-to-point/{session_id}/{frame_id}")
+    def project_pixel(
+        session_id: str,
+        frame_id: str,
+        body: dict,
+    ):
+        try:
+            result = pixel_to_point(
+                root,
+                session_id,
+                frame_id,
+                u=int(body["u"]),
+                v=int(body["v"]),
+                search_radius=int(body.get("search_radius", 6)),
+                min_depth_m=float(body.get("min_depth_m", 0.1)),
+                max_depth_m=float(body.get("max_depth_m", 5.0)),
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"缺少字段: {exc.args[0]}"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **result}
 
     @app.get("/api/pointcloud/{session_id}/{frame_id}")
     def pointcloud(
@@ -166,6 +212,10 @@ def create_pointcloud_app(
                 target_camera_m=target,
                 plane=analysis["plane"],
                 yolo=analysis["yolo"],
+                target_pixel=body.get("target_pixel"),
+                selection_source=str(
+                    body.get("selection_source", "pointcloud")
+                ),
             )
         except KeyError as exc:
             raise HTTPException(

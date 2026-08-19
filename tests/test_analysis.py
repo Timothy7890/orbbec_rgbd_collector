@@ -57,6 +57,8 @@ class AnalysisTests(unittest.TestCase):
                 frame_id,
                 target_camera_m=[0.1, 0.2, 0.95],
                 plane=plane,
+                target_pixel={"u": 320, "v": 240},
+                selection_source="rgb",
                 yolo={
                     "available": True,
                     "boxes": [],
@@ -76,6 +78,8 @@ class AnalysisTests(unittest.TestCase):
             self.assertAlmostEqual(relative["horizontal_m"], 0.02)
             self.assertAlmostEqual(relative["vertical_m"], 0.02)
             self.assertAlmostEqual(relative["normal_m"], 0.02)
+            self.assertEqual(first["target_pixel"], {"u": 320, "v": 240})
+            self.assertEqual(first["selection_source"], "rgb")
 
             save_annotation(
                 root,

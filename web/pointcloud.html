@@ -9,6 +9,7 @@
       color-scheme: dark;
       --bg: #090c11; --panel: #141a24; --line: #2a3445;
       --text: #e8edf5; --muted: #93a0b4; --blue: #4d8eff; --red: #ff6b72;
+      --green: #4dd69a; --orange: #ffb34d;
     }
     * { box-sizing: border-box; }
     body {
@@ -40,7 +41,13 @@
       cursor: pointer;
     }
     button:hover { background: #3274e6; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
     .secondary { background: #202938; border-color: var(--line); margin-top: 8px; }
+    .pick-active { background: #a56812; border-color: var(--orange); }
+    .check {
+      display: flex; align-items: center; gap: 8px; margin: 2px 0 12px;
+    }
+    .check input { width: auto; }
     .status {
       margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
       color: var(--muted); overflow-wrap: anywhere;
@@ -48,6 +55,12 @@
     .status strong { color: var(--text); display: block; font-size: 18px; margin-bottom: 4px; }
     .error { color: var(--red); }
     .hint { margin-top: 14px; color: var(--muted); font-size: 12px; }
+    .analysis {
+      margin-top: 12px; padding: 10px; border: 1px solid var(--line);
+      border-radius: 8px; background: #0d121a; color: var(--muted);
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
     .stage { position: relative; min-width: 0; background: #040609; }
     canvas { width: 100%; height: 100%; display: block; cursor: grab; }
     canvas:active { cursor: grabbing; }
@@ -56,6 +69,11 @@
       border: 1px solid rgba(255,255,255,.12); border-radius: 7px;
       background: rgba(8,11,16,.72); color: var(--muted); pointer-events: none;
       backdrop-filter: blur(8px);
+    }
+    .target-marker {
+      position: absolute; width: 18px; height: 18px; border: 2px solid #fff;
+      border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(255,107,114,.28);
+      transform: translate(-50%, -50%); pointer-events: none; display: none;
     }
     @media (max-width: 760px) {
       body { overflow: auto; }
@@ -97,17 +115,29 @@
       <label>点大小
         <input id="pointSize" type="range" min="1" max="8" step="0.5" value="2">
       </label>
+      <label class="check">
+        <input id="semantic" type="checkbox">
+        YOLO 语义着色（需启动时配置模型）
+      </label>
+      <label>柜面 RANSAC 阈值（mm）
+        <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
+      </label>
       <button id="loadBtn">加载点云</button>
+      <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
+      <button id="pickBtn" class="secondary">点选三维目标</button>
+      <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
       <button id="resetBtn" class="secondary">重置视角</button>
+      <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        左键拖动旋转，滚轮缩放，双击重置视角。点云坐标单位为米。调整深度范围可过滤背景墙。
+        左键拖动旋转，滚轮缩放。先分析柜面，再点“点选三维目标”，在点云中单击目标。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section class="stage">
       <canvas id="canvas"></canvas>
       <div id="hud" class="hud">0 points</div>
+      <div id="targetMarker" class="target-marker"></div>
     </section>
   </div>
 
@@ -184,8 +214,10 @@
     };
     const buffer = gl.createBuffer();
     let pointCount = 0;
+    let cloudView = null;
     let center = [0, 0, 0], radius = 1;
     let yaw = 0, pitch = 0, distance = 2;
+    let selectedTarget = null, currentAnalysis = null, pickMode = false;
 
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
@@ -221,12 +253,13 @@
         gl.uniform1f(locations.pointSize, Number($("pointSize").value));
         gl.drawArrays(gl.POINTS, 0, pointCount);
       }
+      updateTargetMarker();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
 
-    async function json(url) {
-      const response = await fetch(url, {cache: "no-store"});
+    async function json(url, options = {}) {
+      const response = await fetch(url, {cache: "no-store", ...options});
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
       return data;
@@ -236,6 +269,10 @@
       const previous = keepSelection ? $("session").value : "";
       const status = await json("/api/status");
       $("rootPath").textContent = status.data_root;
+      $("semantic").disabled = !status.yolo.enabled;
+      $("semantic").title = status.yolo.enabled
+        ? `模型：${status.yolo.model_path}`
+        : "启动 run-pointcloud.sh 时传入 --model 才能启用";
       const data = await json("/api/sessions");
       $("session").innerHTML = (data.sessions || []).map(item =>
         `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.frame_count} 帧</option>`
@@ -268,6 +305,7 @@
         min_depth_m: $("minDepth").value,
         max_depth_m: $("maxDepth").value,
         max_points: $("maxPoints").value,
+        semantic: $("semantic").checked ? "true" : "false",
       });
       const response = await fetch(
         `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`
@@ -285,12 +323,186 @@
         throw new Error("点云数据长度不完整");
       gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(payload, 8), gl.STATIC_DRAW);
+      cloudView = view;
       center = (response.headers.get("X-Cloud-Center") || "0,0,0").split(",").map(Number);
       radius = Number(response.headers.get("X-Cloud-Radius")) || 1;
       resetView();
       $("hud").textContent = `${pointCount.toLocaleString()} points · stride ${response.headers.get("X-Cloud-Stride")}`;
       setStatus(`${pointCount.toLocaleString()} 个点`, false,
         `${session}<br>${frame}<br>包围半径 ${radius.toFixed(3)} m`);
+      selectedTarget = null;
+      currentAnalysis = null;
+      setPickMode(false);
+      await loadSavedAnnotation();
+    }
+
+    function analysisOptions() {
+      return {
+        plane_threshold_m: Number($("planeThreshold").value) / 1000,
+        min_depth_m: Number($("minDepth").value),
+        max_depth_m: Number($("maxDepth").value),
+      };
+    }
+
+    async function analyzeCurrent() {
+      const session = $("session").value, frame = $("frame").value;
+      if (!session || !frame) throw new Error("请先选择会话和帧");
+      setStatus("正在执行 YOLO 与柜面拟合…");
+      const data = await json(
+        `/api/analyze/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(analysisOptions()),
+        }
+      );
+      currentAnalysis = data.analysis;
+      updateAnalysisPanel();
+      setStatus("分析完成", false,
+        `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
+        `YOLO ${currentAnalysis.yolo.boxes.length} 个框`);
+    }
+
+    async function saveCurrentAnnotation() {
+      const session = $("session").value, frame = $("frame").value;
+      if (!selectedTarget) throw new Error("请先点选三维目标");
+      setStatus("正在保存并复核柜面…");
+      const data = await json(
+        `/api/annotations/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            ...analysisOptions(),
+            target_camera_m: selectedTarget,
+          }),
+        }
+      );
+      currentAnalysis = {
+        plane: data.annotation.plane,
+        yolo: data.annotation.yolo,
+      };
+      selectedTarget = data.annotation.target_camera_m;
+      updateAnalysisPanel(
+        data.annotation.target_plane_coordinates_m,
+        true,
+        data.annotation.target_relative_to_semantic_m
+      );
+      setStatus("标注已保存", false, "annotations.jsonl");
+    }
+
+    async function loadSavedAnnotation() {
+      const session = $("session").value, frame = $("frame").value;
+      if (!session || !frame) return;
+      const data = await json(
+        `/api/sessions/${encodeURIComponent(session)}/annotations`
+      );
+      const saved = (data.annotations || []).find(item => item.frame_id === frame);
+      if (saved) {
+        selectedTarget = saved.target_camera_m;
+        currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
+        updateAnalysisPanel(
+          saved.target_plane_coordinates_m,
+          true,
+          saved.target_relative_to_semantic_m
+        );
+      } else {
+        updateAnalysisPanel();
+      }
+    }
+
+    function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
+      $("saveBtn").disabled = !selectedTarget;
+      const lines = [];
+      if (selectedTarget)
+        lines.push(`目标相机系 m: ${selectedTarget.map(v => v.toFixed(4)).join(", ")}`);
+      if (currentAnalysis?.plane) {
+        const p = currentAnalysis.plane;
+        lines.push(`柜面法向: ${p.normal_camera.map(v => v.toFixed(4)).join(", ")}`);
+        lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
+      }
+      if (currentAnalysis?.yolo)
+        lines.push(`YOLO 框: ${currentAnalysis.yolo.boxes.length}`);
+      if (local)
+        lines.push(`柜面坐标 mm: H ${(local.horizontal_m * 1000).toFixed(1)}, V ${(local.vertical_m * 1000).toFixed(1)}, N ${(local.normal_m * 1000).toFixed(1)}`);
+      if (semanticLocal)
+        lines.push(`相对语义簇 mm: dH ${(semanticLocal.horizontal_m * 1000).toFixed(1)}, dV ${(semanticLocal.vertical_m * 1000).toFixed(1)}, dN ${(semanticLocal.normal_m * 1000).toFixed(1)}`);
+      if (saved) lines.push("状态: 已保存");
+      $("analysis").textContent = lines.length ? lines.join("\n") : "尚未分析或点选";
+    }
+
+    function setPickMode(active) {
+      pickMode = active;
+      $("pickBtn").className = active ? "secondary pick-active" : "secondary";
+      $("pickBtn").textContent = active ? "请在点云中单击目标…" : "点选三维目标";
+      canvas.style.cursor = active ? "crosshair" : "grab";
+    }
+
+    function projectPosition(point) {
+      let x = point[0] - center[0];
+      let y = -(point[1] - center[1]);
+      let z = point[2] - center[2];
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const x1 = cy * x + sy * z;
+      const z1 = -sy * x + cy * z;
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const y2 = cp * y - sp * z1;
+      const z2 = sp * y + cp * z1 - distance;
+      if (z2 >= -0.01) return null;
+      const f = 1.7320508;
+      const ndcX = (f * x1 / (canvas.width / canvas.height)) / -z2;
+      const ndcY = (f * y2) / -z2;
+      if (Math.abs(ndcX) > 1.05 || Math.abs(ndcY) > 1.05) return null;
+      return [
+        (ndcX * 0.5 + 0.5) * canvas.clientWidth,
+        (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
+        -z2,
+      ];
+    }
+
+    function pickTargetAt(clientX, clientY) {
+      if (!cloudView || !pointCount) throw new Error("请先加载点云");
+      const rect = canvas.getBoundingClientRect();
+      const clickX = clientX - rect.left, clickY = clientY - rect.top;
+      let best = null, bestDistance2 = 14 * 14, bestDepth = Infinity;
+      for (let i = 0; i < pointCount; i++) {
+        const offset = 8 + i * 16;
+        const point = [
+          cloudView.getFloat32(offset, true),
+          cloudView.getFloat32(offset + 4, true),
+          cloudView.getFloat32(offset + 8, true),
+        ];
+        const screen = projectPosition(point);
+        if (!screen) continue;
+        const dx = screen[0] - clickX, dy = screen[1] - clickY;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDistance2 || (d2 === bestDistance2 && screen[2] < bestDepth)) {
+          bestDistance2 = d2;
+          bestDepth = screen[2];
+          best = point;
+        }
+      }
+      if (!best) throw new Error("点击位置附近没有点，请增大点大小或调整视角");
+      selectedTarget = best;
+      updateAnalysisPanel();
+      setPickMode(false);
+      setStatus("已点选三维目标", false, best.map(v => v.toFixed(4)).join(", ") + " m");
+    }
+
+    function updateTargetMarker() {
+      const marker = $("targetMarker");
+      if (!selectedTarget) {
+        marker.style.display = "none";
+        return;
+      }
+      const position = projectPosition(selectedTarget);
+      if (!position) {
+        marker.style.display = "none";
+        return;
+      }
+      marker.style.display = "block";
+      marker.style.left = `${position[0]}px`;
+      marker.style.top = `${position[1]}px`;
     }
 
     function setStatus(title, error = false, detail = "") {
@@ -303,17 +515,32 @@
       })[c]);
     }
 
-    $("session").onchange = () => refreshFrames().catch(e => setStatus(e.message, true));
+    $("session").onchange = () => refreshFrames()
+      .then(() => $("frame").value && loadCloud())
+      .catch(e => setStatus(e.message, true));
+    $("frame").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
     $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
+    $("semantic").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
+    $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
+    $("pickBtn").onclick = () => setPickMode(!pickMode);
+    $("saveBtn").onclick = () => saveCurrentAnnotation().catch(e => setStatus(e.message, true));
     $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
     $("resetBtn").onclick = resetView;
-    canvas.ondblclick = resetView;
-    let dragging = false, lastX = 0, lastY = 0;
+    canvas.ondblclick = () => { if (!pickMode) resetView(); };
+    let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0;
     canvas.onpointerdown = event => {
-      dragging = true; lastX = event.clientX; lastY = event.clientY;
+      dragging = !pickMode;
+      lastX = downX = event.clientX;
+      lastY = downY = event.clientY;
       canvas.setPointerCapture(event.pointerId);
     };
-    canvas.onpointerup = () => dragging = false;
+    canvas.onpointerup = event => {
+      dragging = false;
+      if (pickMode && Math.hypot(event.clientX - downX, event.clientY - downY) < 5) {
+        try { pickTargetAt(event.clientX, event.clientY); }
+        catch (error) { setStatus(error.message, true); }
+      }
+    };
     canvas.onpointermove = event => {
       if (!dragging) return;
       yaw += (event.clientX - lastX) * 0.008;

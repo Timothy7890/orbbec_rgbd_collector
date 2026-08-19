@@ -16,6 +16,9 @@ dependencies = [
   "uvicorn[standard]",
 ]
 
+[project.optional-dependencies]
+yolo = ["ultralytics"]
+
 [project.scripts]
 rgbd-collector = "rgbd_collector.cli:main"
 rgbd-pointcloud = "rgbd_collector.pointcloud_cli:main"

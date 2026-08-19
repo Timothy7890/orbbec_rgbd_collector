@@ -68,6 +68,31 @@ class PointCloudTests(unittest.TestCase):
         self.assertEqual(frames[0]["id"], self.frame_id)
         self.assertEqual(frames[0]["trigger"], "manual")
 
+    def test_semantic_boxes_recolor_matching_points(self) -> None:
+        points, metadata = reconstruct_frame(
+            self.root,
+            self.session.session_id,
+            self.frame_id,
+            stride=1,
+            min_depth_m=0.1,
+            max_depth_m=2.0,
+            boxes=[
+                {
+                    "cls": 2,
+                    "name": "switch",
+                    "conf": 0.9,
+                    "xyxy": [0, 0, 4, 4],
+                }
+            ],
+        )
+        self.assertTrue(metadata["semantic"]["enabled"])
+        self.assertGreater(
+            metadata["semantic"]["class_point_counts"]["2"], 0
+        )
+        self.assertTrue(
+            np.any(np.all(points["rgba"][:, :3] == [102, 187, 106], axis=1))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

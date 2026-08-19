@@ -12,6 +12,23 @@ import numpy as np
 POINT_DTYPE = np.dtype(
     [("xyz", "<f4", (3,)), ("rgba", "u1", (4,))], align=False
 )
+SEMANTIC_PALETTE = np.array(
+    [
+        [239, 83, 80],
+        [66, 165, 245],
+        [102, 187, 106],
+        [255, 202, 40],
+        [171, 71, 188],
+        [255, 112, 67],
+        [38, 198, 218],
+        [141, 110, 99],
+        [236, 64, 122],
+        [124, 179, 66],
+        [126, 87, 194],
+        [255, 167, 38],
+    ],
+    dtype=np.uint8,
+)
 
 
 def _safe_child(parent: Path, name: str) -> Path:
@@ -22,6 +39,16 @@ def _safe_child(parent: Path, name: str) -> Path:
     if child.parent != parent:
         raise ValueError("目录越界")
     return child
+
+
+def resolve_frame_paths(
+    data_root: Path, session_id: str, frame_id: str
+) -> tuple[Path, Path]:
+    root = data_root.expanduser().resolve()
+    session_dir = _safe_child(root, session_id)
+    frames_dir = (session_dir / "frames").resolve()
+    frame_dir = _safe_child(frames_dir, frame_id)
+    return session_dir, frame_dir
 
 
 def session_summaries(data_root: Path) -> list[dict[str, Any]]:
@@ -92,6 +119,7 @@ def reconstruct_frame(
     min_depth_m: float = 0.1,
     max_depth_m: float = 5.0,
     max_points: int = 200_000,
+    boxes: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if not 1 <= stride <= 64:
         raise ValueError("stride 必须在 1~64")
@@ -100,10 +128,9 @@ def reconstruct_frame(
     if not 1_000 <= max_points <= 1_000_000:
         raise ValueError("max_points 必须在 1000~1000000")
 
-    root = data_root.expanduser().resolve()
-    session_dir = _safe_child(root, session_id)
-    frames_dir = (session_dir / "frames").resolve()
-    frame_dir = _safe_child(frames_dir, frame_id)
+    session_dir, frame_dir = resolve_frame_paths(
+        data_root, session_id, frame_id
+    )
     session_file = session_dir / "session.json"
     frame_file = frame_dir / "frame.json"
     if not session_file.is_file() or not frame_file.is_file():
@@ -162,6 +189,24 @@ def reconstruct_frame(
             0, z.size - 1, max_points, dtype=np.int64
         )
         u, v, z, rgb = u[selected], v[selected], z[selected], rgb[selected]
+    semantic_counts: dict[str, int] = {}
+    if boxes:
+        semantic_rgb = np.full(rgb.shape, [54, 60, 72], dtype=np.uint8)
+        class_ids = np.full(z.size, -1, dtype=np.int32)
+        for box in sorted(boxes, key=lambda item: float(item.get("conf", 0.0))):
+            try:
+                cls = int(box["cls"])
+                x1, y1, x2, y2 = [float(value) for value in box["xyxy"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            inside = (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
+            class_ids[inside] = cls
+            semantic_rgb[inside] = SEMANTIC_PALETTE[
+                cls % len(SEMANTIC_PALETTE)
+            ]
+        rgb = semantic_rgb
+        for cls in np.unique(class_ids[class_ids >= 0]):
+            semantic_counts[str(int(cls))] = int(np.count_nonzero(class_ids == cls))
     distortion = (
         session.get("camera", {})
         .get("color", {})
@@ -208,10 +253,15 @@ def reconstruct_frame(
         "point_count": int(points.size),
         "stride": stride,
         "depth_range_m": [min_depth_m, max_depth_m],
+        "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
         "color_distortion_compensated": bool(
             coefficients.size in {4, 5, 8, 12, 14}
             and np.any(np.abs(coefficients) > 1e-12)
         ),
+        "semantic": {
+            "enabled": bool(boxes),
+            "class_point_counts": semantic_counts,
+        },
         "bounds": {
             "min": minimum.tolist(),
             "max": maximum.tolist(),

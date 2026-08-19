@@ -159,6 +159,9 @@
       <label>柜面 RANSAC 阈值（mm）
         <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
       </label>
+      <label>WASDQE 微调步长（mm）
+        <input id="nudgeStep" type="number" min="0.1" max="100" step="0.1" value="1">
+      </label>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="pickBtn" class="secondary">点选三维目标</button>
@@ -169,7 +172,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧。左键拖动旋转，滚轮缩放。先分析柜面，再点“点选三维目标”，在点云中单击目标。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧。A/D 调 X，W/S 调 Y，Q/E 调 Z。左键拖动旋转，滚轮缩放。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -269,6 +272,7 @@
     let yaw = 0, pitch = 0, distance = 2;
     let selectedTarget = null, currentAnalysis = null, pickMode = false;
     let selectedPixel = null, selectionSource = "pointcloud";
+    let targetAdjustment = [0, 0, 0];
 
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
@@ -384,6 +388,7 @@
       selectedTarget = null;
       selectedPixel = null;
       selectionSource = "pointcloud";
+      targetAdjustment = [0, 0, 0];
       currentAnalysis = null;
       setPickMode(false);
       await loadSavedAnnotation();
@@ -432,6 +437,7 @@
             target_camera_m: selectedTarget,
             target_pixel: selectedPixel,
             selection_source: selectionSource,
+            target_adjustment_camera_m: targetAdjustment,
           }),
         }
       );
@@ -442,6 +448,8 @@
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
+      targetAdjustment =
+        data.annotation.target_adjustment_camera_m || targetAdjustment;
       updateAnalysisPanel(
         data.annotation.target_plane_coordinates_m,
         true,
@@ -461,6 +469,8 @@
         selectedTarget = saved.target_camera_m;
         selectedPixel = saved.target_pixel || null;
         selectionSource = saved.selection_source || "pointcloud";
+        targetAdjustment =
+          saved.target_adjustment_camera_m || [0, 0, 0];
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
         updateAnalysisPanel(
           saved.target_plane_coordinates_m,
@@ -482,6 +492,8 @@
       }
       if (selectedPixel)
         lines.push(`RGB 像素: (${selectedPixel.u}, ${selectedPixel.v})`);
+      if (targetAdjustment.some(value => Math.abs(value) > 1e-9))
+        lines.push(`累计微调 mm: dX ${(targetAdjustment[0] * 1000).toFixed(1)}, dY ${(targetAdjustment[1] * 1000).toFixed(1)}, dZ ${(targetAdjustment[2] * 1000).toFixed(1)}`);
       if (currentAnalysis?.plane) {
         const p = currentAnalysis.plane;
         lines.push(`柜面法向: ${p.normal_camera.map(v => v.toFixed(4)).join(", ")}`);
@@ -582,6 +594,7 @@
       selectedTarget = data.point_camera_m;
       selectedPixel = data.used_pixel;
       selectionSource = "rgb";
+      targetAdjustment = [0, 0, 0];
       setPickMode(false);
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -642,6 +655,7 @@
       selectedTarget = best;
       selectedPixel = null;
       selectionSource = "pointcloud";
+      targetAdjustment = [0, 0, 0];
       updateAnalysisPanel();
       renderRgbOverlay();
       setPickMode(false);
@@ -662,6 +676,41 @@
       marker.style.display = "block";
       marker.style.left = `${position[0]}px`;
       marker.style.top = `${position[1]}px`;
+    }
+
+    function nudgeTarget(code) {
+      const commands = {
+        KeyA: [0, -1], KeyD: [0, 1],
+        KeyW: [1, -1], KeyS: [1, 1],
+        KeyQ: [2, -1], KeyE: [2, 1],
+      };
+      const command = commands[code];
+      if (!command) return false;
+      if (!selectedTarget) {
+        setStatus("请先选择三维目标", true);
+        return true;
+      }
+      const step = Number($("nudgeStep").value) / 1000;
+      if (!Number.isFinite(step) || step <= 0) {
+        setStatus("微调步长必须大于零", true);
+        return true;
+      }
+      const [axis, direction] = command;
+      const next = [...selectedTarget];
+      next[axis] += direction * step;
+      if (next[2] <= 0) {
+        setStatus("Z 坐标必须大于零", true);
+        return true;
+      }
+      selectedTarget = next;
+      targetAdjustment[axis] += direction * step;
+      updateAnalysisPanel();
+      setStatus(
+        `已微调 ${["X", "Y", "Z"][axis]} ${direction > 0 ? "+" : "−"}${(step * 1000).toFixed(1)} mm`,
+        false,
+        selectedTarget.map(value => value.toFixed(4)).join(", ") + " m"
+      );
+      return true;
     }
 
     function setStatus(title, error = false, detail = "") {
@@ -696,10 +745,15 @@
     $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
     $("resetBtn").onclick = resetView;
     document.addEventListener("keydown", event => {
-      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLElement &&
           (target.matches("input, textarea") || target.isContentEditable)) return;
+      if (nudgeTarget(event.code)) {
+        event.preventDefault();
+        return;
+      }
+      if (event.repeat) return;
 
       const direction = event.code === "KeyH" ? -1 :
         event.code === "KeyL" ? 1 : 0;

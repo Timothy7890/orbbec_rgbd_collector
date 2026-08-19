@@ -216,6 +216,9 @@ def create_pointcloud_app(
                 selection_source=str(
                     body.get("selection_source", "pointcloud")
                 ),
+                target_adjustment_camera_m=body.get(
+                    "target_adjustment_camera_m"
+                ),
             )
         except KeyError as exc:
             raise HTTPException(

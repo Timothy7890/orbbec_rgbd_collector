@@ -254,6 +254,7 @@ def save_annotation(
     yolo: dict[str, Any] | None = None,
     target_pixel: dict[str, Any] | None = None,
     selection_source: str = "pointcloud",
+    target_adjustment_camera_m: list[float] | None = None,
 ) -> dict[str, Any]:
     _, frame_dir = resolve_frame_paths(data_root, session_id, frame_id)
     if not frame_dir.is_dir():
@@ -265,6 +266,11 @@ def save_annotation(
         raise ValueError("目标点深度必须大于零")
     if selection_source not in {"pointcloud", "rgb"}:
         raise ValueError("selection_source 必须是 pointcloud 或 rgb")
+    adjustment = np.asarray(
+        target_adjustment_camera_m or [0.0, 0.0, 0.0], dtype=np.float64
+    )
+    if adjustment.shape != (3,) or not np.isfinite(adjustment).all():
+        raise ValueError("目标微调量必须是三个有限数值")
 
     record = {
         "schema": "rgbd-target-annotation/v1",
@@ -272,6 +278,7 @@ def save_annotation(
         "frame_id": frame_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "target_camera_m": target.tolist(),
+        "target_adjustment_camera_m": adjustment.tolist(),
         "selection_source": selection_source,
         "target_plane_coordinates_m": target_plane_coordinates(
             target.tolist(), plane

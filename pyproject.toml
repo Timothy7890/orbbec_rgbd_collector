@@ -7,7 +7,7 @@ name = "orbbec-rgbd-collector"
 version = "0.1.0"
 description = "Exclusive Orbbec RGB-D dataset collector for Apple Silicon Macs"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.10,<3.14"
 dependencies = [
   "fastapi",
   "numpy",

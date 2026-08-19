@@ -2,17 +2,27 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
-PYTHON="$ROOT/.venv/bin/python"
 
-if [[ ! -x "$PYTHON" ]]; then
-    echo "未找到虚拟环境：$ROOT/.venv"
-    echo "请先按 README 执行安装："
-    echo "  python3.11 -m venv .venv"
-    echo "  source .venv/bin/activate"
-    echo "  python -m pip install -U pip"
+if [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+    PYTHON="$CONDA_PREFIX/bin/python"
+elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON=$(command -v python3)
+else
+    echo "没有找到可用 Python。请先激活 Conda 环境："
+    echo "  conda activate fastapi"
     echo "  python -m pip install -e ."
     exit 1
 fi
 
 cd "$ROOT"
+if ! "$PYTHON" -c "import rgbd_collector" >/dev/null 2>&1; then
+    echo "当前 Python 尚未安装本项目：$PYTHON"
+    echo "请在当前环境执行："
+    echo "  python -m pip install -e ."
+    exit 1
+fi
+
+echo "使用 Python: $PYTHON"
 exec "$PYTHON" -m rgbd_collector.cli "$@"

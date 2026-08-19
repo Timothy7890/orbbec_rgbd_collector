@@ -17,7 +17,7 @@
 
 - Apple Silicon Mac（M1/M2/M3/M4/M5）；
 - macOS 13 或更高版本；
-- Python 3.11；
+- Python 3.10～3.13；
 - USB 3.0 数据线和接口；
 - Orbbec Gemini 335、336、335L 或 336L。
 
@@ -25,13 +25,31 @@
 `pyorbbecsdk`。Gemini 335/336(L) 官方推荐固件版本为 1.8.10；较旧固件若能
 稳定输出所选 RGB-D 档位也可先使用，遇到同步或 UVC 问题时再按官方流程升级。
 
-```bash
-cd ~/yx/project/orbbec_rgbd_collector
+推荐使用 Conda 独立环境：
 
+```bash
+cd <orbbec_rgbd_collector 项目目录>
+
+conda create -n rgbd-collector python=3.11
+conda activate rgbd-collector
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+也可以直接使用已有的 Conda 环境：
+
+```bash
+conda activate fastapi
+cd <orbbec_rgbd_collector 项目目录>
+python -m pip install -e .
+```
+
+`run.sh` 会优先使用当前已激活的 Conda 环境；没有激活 Conda 时才尝试项目内的
+`.venv` 或系统 `python3`。如果希望使用 venv：
+
+```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-
-python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 

@@ -39,6 +39,12 @@
     }
     .badge.ok { color: var(--green); border-color: #28684d; }
     .badge.error { color: var(--red); border-color: #74343a; }
+    .header-actions { display: flex; align-items: center; gap: 9px; }
+    .header-link {
+      color: #a9c7ff; text-decoration: none; border: 1px solid var(--line);
+      border-radius: 8px; padding: 5px 9px; white-space: nowrap;
+    }
+    .header-link:hover { border-color: var(--blue); }
     main { padding: 18px 24px 36px; max-width: 1800px; margin: auto; }
     .viewer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .viewer, .card {
@@ -57,6 +63,7 @@
     }
     .image-stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .image-stage .waiting { position: absolute; color: #69758a; pointer-events: none; }
+    .image-stage.has-frame .waiting { display: none; }
     .controls {
       margin-top: 14px; padding: 15px; display: grid;
       grid-template-columns: minmax(180px, 1.4fr) repeat(2, minmax(110px, .55fr));
@@ -120,7 +127,10 @@
       <h1>Orbbec RGB-D 数据采集</h1>
       <div class="subtitle">RGB、原始深度、对齐深度与相机标定同步落盘</div>
     </div>
-    <div id="cameraBadge" class="badge">连接中</div>
+    <div class="header-actions">
+      <a id="pointcloudLink" class="header-link" target="_blank">点云预览 :17002</a>
+      <div id="cameraBadge" class="badge">连接中</div>
+    </div>
   </header>
 
   <main>
@@ -316,6 +326,7 @@
         setMessage("正在重新连接相机…");
         await api("/api/camera/restart");
         document.querySelectorAll(".image-stage img").forEach(img => {
+          img.closest(".image-stage").classList.remove("has-frame");
           img.src = img.src.split("?")[0] + "?" + Date.now();
         });
         setMessage("相机已重新连接", "ok");
@@ -340,6 +351,13 @@
       const button = $(buttonId);
       if (!button.disabled) button.click();
     });
+
+    document.querySelectorAll(".image-stage img").forEach(img => {
+      const stage = img.closest(".image-stage");
+      img.addEventListener("load", () => stage.classList.add("has-frame"));
+      img.addEventListener("error", () => stage.classList.remove("has-frame"));
+    });
+    $("pointcloudLink").href = `${location.protocol}//${location.hostname}:17002/`;
 
     setInterval(refreshStatus, 1000);
     setInterval(refreshSessions, 5000);

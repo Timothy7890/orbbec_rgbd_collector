@@ -80,6 +80,29 @@ sudo -E ./run.sh
 http://127.0.0.1:7003
 ```
 
+在另一个终端启动已拍摄数据的点云预览：
+
+```bash
+conda activate rgbd-collector   # 或你实际安装本项目的 Conda 环境
+cd <orbbec_rgbd_collector 项目目录>
+./run-pointcloud.sh
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:17002
+```
+
+点云服务不连接、不占用相机。它按需读取 `datasets` 中的 `color.jpg`、
+`depth_aligned.png`、内参和深度尺度重建点云，因此不额外保存重复的 PLY 文件。
+若会话中记录了彩色畸变系数，重建时会先做像素去畸变再生成三维射线。
+若采集时使用了自定义 `--data-dir`，点云服务也要传入相同目录：
+
+```bash
+./run-pointcloud.sh --data-dir /Volumes/RGBD_DATA/datasets
+```
+
 有多台相机时必须指定序列号：
 
 ```bash

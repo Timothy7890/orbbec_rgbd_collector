@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RGB-D 点云预览</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090c11; --panel: #141a24; --line: #2a3445;
+      --text: #e8edf5; --muted: #93a0b4; --blue: #4d8eff; --red: #ff6b72;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+    header {
+      height: 58px; display: flex; align-items: center; justify-content: space-between;
+      gap: 14px; padding: 0 18px; border-bottom: 1px solid var(--line);
+      background: #0d1118;
+    }
+    h1 { font-size: 17px; margin: 0; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .layout { height: calc(100vh - 58px); display: grid; grid-template-columns: 310px 1fr; }
+    aside {
+      padding: 15px; border-right: 1px solid var(--line); background: var(--panel);
+      overflow-y: auto;
+    }
+    label { display: grid; gap: 5px; margin-bottom: 12px; color: var(--muted); font-size: 12px; }
+    select, input {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px;
+      background: #0d121a; color: var(--text); padding: 8px 9px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    button {
+      width: 100%; border: 1px solid #427ce0; border-radius: 8px;
+      background: #2868d6; color: white; font-weight: 650; padding: 9px;
+      cursor: pointer;
+    }
+    button:hover { background: #3274e6; }
+    .secondary { background: #202938; border-color: var(--line); margin-top: 8px; }
+    .status {
+      margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+      color: var(--muted); overflow-wrap: anywhere;
+    }
+    .status strong { color: var(--text); display: block; font-size: 18px; margin-bottom: 4px; }
+    .error { color: var(--red); }
+    .hint { margin-top: 14px; color: var(--muted); font-size: 12px; }
+    .stage { position: relative; min-width: 0; background: #040609; }
+    canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    .hud {
+      position: absolute; left: 14px; bottom: 12px; padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.12); border-radius: 7px;
+      background: rgba(8,11,16,.72); color: var(--muted); pointer-events: none;
+      backdrop-filter: blur(8px);
+    }
+    @media (max-width: 760px) {
+      body { overflow: auto; }
+      .layout { display: flex; flex-direction: column; height: auto; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .stage { height: 65vh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>已采集 RGB-D 点云</h1><div class="muted">由 color.jpg + depth_aligned.png 按需重建</div></div>
+    <div id="rootPath" class="muted">连接中</div>
+  </header>
+  <div class="layout">
+    <aside>
+      <label>采集会话
+        <select id="session"></select>
+      </label>
+      <label>帧
+        <select id="frame"></select>
+      </label>
+      <div class="row">
+        <label>采样步长
+          <input id="stride" type="number" min="1" max="64" value="3">
+        </label>
+        <label>最大点数
+          <input id="maxPoints" type="number" min="1000" max="1000000" value="200000">
+        </label>
+      </div>
+      <div class="row">
+        <label>最近距离（m）
+          <input id="minDepth" type="number" min="0" max="99" step="0.05" value="0.1">
+        </label>
+        <label>最远距离（m）
+          <input id="maxDepth" type="number" min="0.01" max="100" step="0.1" value="5">
+        </label>
+      </div>
+      <label>点大小
+        <input id="pointSize" type="range" min="1" max="8" step="0.5" value="2">
+      </label>
+      <button id="loadBtn">加载点云</button>
+      <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
+      <button id="resetBtn" class="secondary">重置视角</button>
+      <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
+      <div class="hint">
+        左键拖动旋转，滚轮缩放，双击重置视角。点云坐标单位为米。调整深度范围可过滤背景墙。
+      </div>
+    </aside>
+    <section class="stage">
+      <canvas id="canvas"></canvas>
+      <div id="hud" class="hud">0 points</div>
+    </section>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const canvas = $("canvas");
+    const gl = canvas.getContext("webgl", {antialias: true, alpha: false});
+    if (!gl) throw new Error("浏览器不支持 WebGL");
+
+    const vertexSource = `
+      attribute vec3 aPosition;
+      attribute vec4 aColor;
+      uniform vec3 uCenter;
+      uniform float uYaw;
+      uniform float uPitch;
+      uniform float uDistance;
+      uniform float uAspect;
+      uniform float uPointSize;
+      varying vec4 vColor;
+      void main() {
+        vec3 p = aPosition - uCenter;
+        p.y = -p.y;
+        float cy = cos(uYaw), sy = sin(uYaw);
+        float x1 = cy * p.x + sy * p.z;
+        float z1 = -sy * p.x + cy * p.z;
+        float cp = cos(uPitch), sp = sin(uPitch);
+        float y2 = cp * p.y - sp * z1;
+        float z2 = sp * p.y + cp * z1 - uDistance;
+        float nearZ = 0.01, farZ = 100.0;
+        float f = 1.7320508;
+        gl_Position = vec4(
+          f * x1 / uAspect,
+          f * y2,
+          ((farZ + nearZ) / (nearZ - farZ)) * z2 +
+            (2.0 * farZ * nearZ / (nearZ - farZ)),
+          -z2
+        );
+        gl_PointSize = uPointSize;
+        vColor = aColor;
+      }`;
+    const fragmentSource = `
+      precision mediump float;
+      varying vec4 vColor;
+      void main() {
+        vec2 q = gl_PointCoord - vec2(0.5);
+        if (dot(q, q) > 0.25) discard;
+        gl_FragColor = vColor;
+      }`;
+
+    function shader(type, source) {
+      const item = gl.createShader(type);
+      gl.shaderSource(item, source);
+      gl.compileShader(item);
+      if (!gl.getShaderParameter(item, gl.COMPILE_STATUS))
+        throw new Error(gl.getShaderInfoLog(item));
+      return item;
+    }
+    const program = gl.createProgram();
+    gl.attachShader(program, shader(gl.VERTEX_SHADER, vertexSource));
+    gl.attachShader(program, shader(gl.FRAGMENT_SHADER, fragmentSource));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+      throw new Error(gl.getProgramInfoLog(program));
+    gl.useProgram(program);
+    const locations = {
+      position: gl.getAttribLocation(program, "aPosition"),
+      color: gl.getAttribLocation(program, "aColor"),
+      center: gl.getUniformLocation(program, "uCenter"),
+      yaw: gl.getUniformLocation(program, "uYaw"),
+      pitch: gl.getUniformLocation(program, "uPitch"),
+      distance: gl.getUniformLocation(program, "uDistance"),
+      aspect: gl.getUniformLocation(program, "uAspect"),
+      pointSize: gl.getUniformLocation(program, "uPointSize"),
+    };
+    const buffer = gl.createBuffer();
+    let pointCount = 0;
+    let center = [0, 0, 0], radius = 1;
+    let yaw = 0, pitch = 0, distance = 2;
+
+    function resetView() {
+      yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
+    }
+
+    function resize() {
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+      const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width; canvas.height = height;
+      }
+      gl.viewport(0, 0, width, height);
+    }
+
+    function render() {
+      resize();
+      gl.clearColor(0.015, 0.022, 0.035, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      if (pointCount) {
+        gl.useProgram(program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.enableVertexAttribArray(locations.position);
+        gl.vertexAttribPointer(locations.position, 3, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(locations.color);
+        gl.vertexAttribPointer(locations.color, 4, gl.UNSIGNED_BYTE, true, 16, 12);
+        gl.uniform3fv(locations.center, center);
+        gl.uniform1f(locations.yaw, yaw);
+        gl.uniform1f(locations.pitch, pitch);
+        gl.uniform1f(locations.distance, distance);
+        gl.uniform1f(locations.aspect, canvas.width / canvas.height);
+        gl.uniform1f(locations.pointSize, Number($("pointSize").value));
+        gl.drawArrays(gl.POINTS, 0, pointCount);
+      }
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    async function json(url) {
+      const response = await fetch(url, {cache: "no-store"});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      return data;
+    }
+
+    async function refreshSessions(keepSelection = true) {
+      const previous = keepSelection ? $("session").value : "";
+      const status = await json("/api/status");
+      $("rootPath").textContent = status.data_root;
+      const data = await json("/api/sessions");
+      $("session").innerHTML = (data.sessions || []).map(item =>
+        `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.frame_count} 帧</option>`
+      ).join("");
+      if (previous && [...$("session").options].some(o => o.value === previous))
+        $("session").value = previous;
+      await refreshFrames();
+    }
+
+    async function refreshFrames() {
+      const session = $("session").value;
+      if (!session) {
+        $("frame").innerHTML = "";
+        setStatus("没有可用拍摄会话");
+        return;
+      }
+      const data = await json(`/api/sessions/${encodeURIComponent(session)}/frames`);
+      $("frame").innerHTML = (data.frames || []).map(item =>
+        `<option value="${escapeHtml(item.id)}">#${item.sequence} · ${escapeHtml(item.saved_at || "")} · 有效 ${((item.valid_ratio || 0) * 100).toFixed(1)}%</option>`
+      ).join("");
+      if ($("frame").options.length) $("frame").selectedIndex = $("frame").options.length - 1;
+    }
+
+    async function loadCloud() {
+      const session = $("session").value, frame = $("frame").value;
+      if (!session || !frame) return setStatus("请先选择会话和帧", true);
+      setStatus("点云重建中…");
+      const query = new URLSearchParams({
+        stride: $("stride").value,
+        min_depth_m: $("minDepth").value,
+        max_depth_m: $("maxDepth").value,
+        max_points: $("maxPoints").value,
+      });
+      const response = await fetch(
+        `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`
+      );
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || `HTTP ${response.status}`);
+      }
+      const payload = await response.arrayBuffer();
+      const view = new DataView(payload);
+      const magic = String.fromCharCode(...new Uint8Array(payload, 0, 4));
+      if (magic !== "PCD1") throw new Error("点云二进制格式错误");
+      pointCount = view.getUint32(4, true);
+      if (payload.byteLength !== 8 + pointCount * 16)
+        throw new Error("点云数据长度不完整");
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(payload, 8), gl.STATIC_DRAW);
+      center = (response.headers.get("X-Cloud-Center") || "0,0,0").split(",").map(Number);
+      radius = Number(response.headers.get("X-Cloud-Radius")) || 1;
+      resetView();
+      $("hud").textContent = `${pointCount.toLocaleString()} points · stride ${response.headers.get("X-Cloud-Stride")}`;
+      setStatus(`${pointCount.toLocaleString()} 个点`, false,
+        `${session}<br>${frame}<br>包围半径 ${radius.toFixed(3)} m`);
+    }
+
+    function setStatus(title, error = false, detail = "") {
+      $("status").className = "status" + (error ? " error" : "");
+      $("status").innerHTML = `<strong>${title}</strong>${detail}`;
+    }
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[c]);
+    }
+
+    $("session").onchange = () => refreshFrames().catch(e => setStatus(e.message, true));
+    $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
+    $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
+    $("resetBtn").onclick = resetView;
+    canvas.ondblclick = resetView;
+    let dragging = false, lastX = 0, lastY = 0;
+    canvas.onpointerdown = event => {
+      dragging = true; lastX = event.clientX; lastY = event.clientY;
+      canvas.setPointerCapture(event.pointerId);
+    };
+    canvas.onpointerup = () => dragging = false;
+    canvas.onpointermove = event => {
+      if (!dragging) return;
+      yaw += (event.clientX - lastX) * 0.008;
+      pitch = Math.max(-1.5, Math.min(1.5, pitch + (event.clientY - lastY) * 0.008));
+      lastX = event.clientX; lastY = event.clientY;
+    };
+    canvas.onwheel = event => {
+      event.preventDefault();
+      distance = Math.max(0.02, distance * Math.exp(event.deltaY * 0.001));
+    };
+    window.onresize = resize;
+
+    refreshSessions(false)
+      .then(() => $("frame").value && loadCloud())
+      .catch(error => setStatus(error.message, true));
+  </script>
+</body>
+</html>

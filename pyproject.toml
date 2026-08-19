@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 rgbd-collector = "rgbd_collector.cli:main"
+rgbd-pointcloud = "rgbd_collector.pointcloud_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

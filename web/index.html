@@ -152,9 +152,9 @@
         <input id="maxFrames" type="number" min="1" max="1000000" step="1" placeholder="不限">
       </label>
       <div class="buttons">
-        <button id="captureBtn" class="primary">拍摄一组</button>
-        <button id="startBtn" class="record">开始连续采集</button>
-        <button id="stopBtn" class="stop">停止连续采集</button>
+        <button id="captureBtn" class="primary" title="快捷键：空格">拍摄一组（空格）</button>
+        <button id="startBtn" class="record" title="快捷键：A">开始连续采集（A）</button>
+        <button id="stopBtn" class="stop" title="快捷键：D">停止连续采集（D）</button>
         <button id="closeBtn">结束当前会话</button>
         <button id="restartBtn">重新连接相机</button>
       </div>
@@ -322,6 +322,24 @@
         await refreshStatus();
       } catch (error) { setMessage(error.message, "error"); }
     };
+
+    document.addEventListener("keydown", event => {
+      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement &&
+          (target.matches("input, textarea, select") || target.isContentEditable)) return;
+
+      const buttonId = {
+        Space: "captureBtn",
+        KeyA: "startBtn",
+        KeyD: "stopBtn",
+      }[event.code];
+      if (!buttonId) return;
+
+      event.preventDefault();
+      const button = $(buttonId);
+      if (!button.disabled) button.click();
+    });
 
     setInterval(refreshStatus, 1000);
     setInterval(refreshSessions, 5000);

@@ -131,7 +131,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        左键拖动旋转，滚轮缩放。先分析柜面，再点“点选三维目标”，在点云中单击目标。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧。左键拖动旋转，滚轮缩放。先分析柜面，再点“点选三维目标”，在点云中单击目标。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section class="stage">
@@ -527,6 +527,26 @@
     $("saveBtn").onclick = () => saveCurrentAnnotation().catch(e => setStatus(e.message, true));
     $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
     $("resetBtn").onclick = resetView;
+    document.addEventListener("keydown", event => {
+      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement &&
+          (target.matches("input, textarea") || target.isContentEditable)) return;
+
+      const direction = event.code === "KeyH" ? -1 :
+        event.code === "KeyL" ? 1 : 0;
+      if (!direction) return;
+
+      const frames = $("frame");
+      const next = Math.max(
+        0,
+        Math.min(frames.options.length - 1, frames.selectedIndex + direction)
+      );
+      if (next === frames.selectedIndex) return;
+      event.preventDefault();
+      frames.selectedIndex = next;
+      frames.dispatchEvent(new Event("change"));
+    });
     canvas.ondblclick = () => { if (!pickMode) resetView(); };
     let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0;
     canvas.onpointerdown = event => {

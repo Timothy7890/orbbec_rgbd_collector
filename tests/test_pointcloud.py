@@ -69,6 +69,16 @@ class PointCloudTests(unittest.TestCase):
         self.assertEqual(frames[0]["id"], self.frame_id)
         self.assertEqual(frames[0]["trigger"], "manual")
 
+    def test_dataset_browser_skips_incomplete_manifest_frame(self) -> None:
+        frame_dir = self.session.path / "frames" / self.frame_id
+        (frame_dir / "frame.json").unlink()
+
+        frames = frame_summaries(self.root, self.session.session_id)
+        sessions = session_summaries(self.root)
+
+        self.assertEqual(frames, [])
+        self.assertEqual(sessions[0]["frame_count"], 0)
+
     def test_semantic_boxes_recolor_matching_points(self) -> None:
         points, metadata = reconstruct_frame(
             self.root,

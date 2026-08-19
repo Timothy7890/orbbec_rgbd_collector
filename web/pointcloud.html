@@ -273,6 +273,24 @@
     let selectedTarget = null, currentAnalysis = null, pickMode = false;
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
+    const selectionStorageKey = "rgbd-pointcloud-selection";
+
+    function savedSelection() {
+      try {
+        return JSON.parse(localStorage.getItem(selectionStorageKey) || "{}");
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function rememberSelection() {
+      try {
+        localStorage.setItem(selectionStorageKey, JSON.stringify({
+          session: $("session").value,
+          frame: $("frame").value,
+        }));
+      } catch (_) {}
+    }
 
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
@@ -321,7 +339,10 @@
     }
 
     async function refreshSessions(keepSelection = true) {
-      const previous = keepSelection ? $("session").value : "";
+      const saved = keepSelection ? savedSelection() : {};
+      const previous = keepSelection
+        ? ($("session").value || saved.session || "")
+        : "";
       const status = await json("/api/status");
       $("rootPath").textContent = status.data_root;
       $("semantic").disabled = !status.yolo.enabled;
@@ -334,10 +355,13 @@
       ).join("");
       if (previous && [...$("session").options].some(o => o.value === previous))
         $("session").value = previous;
-      await refreshFrames();
+      await refreshFrames(keepSelection, saved.frame);
     }
 
-    async function refreshFrames() {
+    async function refreshFrames(keepSelection = true, savedFrame = "") {
+      const previous = keepSelection
+        ? ($("frame").value || savedFrame || "")
+        : "";
       const session = $("session").value;
       if (!session) {
         $("frame").innerHTML = "";
@@ -348,7 +372,11 @@
       $("frame").innerHTML = (data.frames || []).map(item =>
         `<option value="${escapeHtml(item.id)}">#${item.sequence} · ${escapeHtml(item.saved_at || "")} · 有效 ${((item.valid_ratio || 0) * 100).toFixed(1)}%</option>`
       ).join("");
-      if ($("frame").options.length) $("frame").selectedIndex = $("frame").options.length - 1;
+      if (previous && [...$("frame").options].some(option => option.value === previous))
+        $("frame").value = previous;
+      else if ($("frame").options.length)
+        $("frame").selectedIndex = $("frame").options.length - 1;
+      rememberSelection();
     }
 
     async function loadCloud() {
@@ -723,10 +751,13 @@
       })[c]);
     }
 
-    $("session").onchange = () => refreshFrames()
+    $("session").onchange = () => refreshFrames(false)
       .then(() => $("frame").value && loadCloud())
       .catch(e => setStatus(e.message, true));
-    $("frame").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
+    $("frame").onchange = () => {
+      rememberSelection();
+      loadCloud().catch(e => setStatus(e.message, true));
+    };
     $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
     $("semantic").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
@@ -796,7 +827,7 @@
     };
     window.onresize = resize;
 
-    refreshSessions(false)
+    refreshSessions(true)
       .then(() => $("frame").value && loadCloud())
       .catch(error => setStatus(error.message, true));
   </script>

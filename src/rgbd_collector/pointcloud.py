@@ -96,9 +96,21 @@ def frame_summaries(data_root: Path, session_id: str) -> list[dict[str, Any]]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        frame_id = record.get("frame_id")
+        if not isinstance(frame_id, str):
+            continue
+        try:
+            frame_dir = _safe_child(session_dir / "frames", frame_id)
+        except ValueError:
+            continue
+        required_files = ("frame.json", "color.jpg", "depth_aligned.png")
+        if not frame_dir.is_dir() or not all(
+            (frame_dir / name).is_file() for name in required_files
+        ):
+            continue
         output.append(
             {
-                "id": record.get("frame_id"),
+                "id": frame_id,
                 "sequence": record.get("sequence"),
                 "saved_at": record.get("saved_at"),
                 "trigger": record.get("trigger"),

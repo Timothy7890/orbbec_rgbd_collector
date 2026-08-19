@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbbec-rgbd-collector"
+version = "0.1.0"
+description = "Exclusive Orbbec RGB-D dataset collector for Apple Silicon Macs"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi",
+  "numpy",
+  "opencv-python",
+  "pyorbbecsdk2",
+  "uvicorn[standard]",
+]
+
+[project.scripts]
+rgbd-collector = "rgbd_collector.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

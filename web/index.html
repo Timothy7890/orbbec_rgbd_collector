@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbbec RGB-D 数据采集</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e13;
+      --panel: #141922;
+      --panel2: #1a2130;
+      --line: #293245;
+      --text: #e8edf5;
+      --muted: #93a0b4;
+      --blue: #4c8dff;
+      --green: #34c784;
+      --red: #ff6b72;
+      --amber: #f0b64d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% -10%, #17243c 0, var(--bg) 38%);
+      color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 18px; padding: 18px 24px; border-bottom: 1px solid var(--line);
+      background: rgba(11,14,19,.82); backdrop-filter: blur(14px);
+      position: sticky; top: 0; z-index: 5;
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+    .subtitle { color: var(--muted); font-size: 12px; }
+    .badge {
+      border: 1px solid var(--line); border-radius: 999px;
+      padding: 5px 10px; color: var(--muted); white-space: nowrap;
+    }
+    .badge.ok { color: var(--green); border-color: #28684d; }
+    .badge.error { color: var(--red); border-color: #74343a; }
+    main { padding: 18px 24px 36px; max-width: 1800px; margin: auto; }
+    .viewer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .viewer, .card {
+      border: 1px solid var(--line); border-radius: 12px;
+      background: linear-gradient(145deg, var(--panel), #10151e);
+      overflow: hidden; box-shadow: 0 12px 30px rgba(0,0,0,.18);
+    }
+    .viewer-head {
+      display: flex; justify-content: space-between; padding: 10px 13px;
+      border-bottom: 1px solid var(--line); color: var(--muted);
+    }
+    .viewer-head strong { color: var(--text); }
+    .image-stage {
+      aspect-ratio: 16 / 9; background: #050608; display: grid; place-items: center;
+      position: relative;
+    }
+    .image-stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .image-stage .waiting { position: absolute; color: #69758a; pointer-events: none; }
+    .controls {
+      margin-top: 14px; padding: 15px; display: grid;
+      grid-template-columns: minmax(180px, 1.4fr) repeat(2, minmax(110px, .55fr));
+      gap: 12px; align-items: end;
+    }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    input {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px;
+      padding: 9px 10px; background: #0d121a; color: var(--text); outline: none;
+    }
+    input:focus { border-color: var(--blue); }
+    .buttons {
+      grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 9px;
+      padding-top: 2px;
+    }
+    button {
+      border: 1px solid var(--line); border-radius: 8px; padding: 9px 15px;
+      background: var(--panel2); color: var(--text); cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover:not(:disabled) { border-color: #52627e; transform: translateY(-1px); }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    button.primary { background: #2868da; border-color: #3d7be4; }
+    button.record { background: #23734f; border-color: #319669; }
+    button.stop { background: #75353a; border-color: #a14951; }
+    .info-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px;
+    }
+    .card { padding: 13px 15px; min-height: 92px; }
+    .card h2 { font-size: 12px; color: var(--muted); margin: 0 0 9px; font-weight: 500; }
+    .value { font-size: 18px; font-weight: 650; overflow-wrap: anywhere; }
+    .details { color: var(--muted); font-size: 12px; margin-top: 5px; overflow-wrap: anywhere; }
+    .notice {
+      margin-top: 14px; border: 1px solid #594c2c; background: #211d13;
+      color: #dec581; border-radius: 9px; padding: 10px 13px;
+    }
+    .message { min-height: 22px; margin-top: 10px; color: var(--muted); }
+    .message.error { color: var(--red); }
+    .message.ok { color: var(--green); }
+    .sessions { margin-top: 14px; }
+    .sessions h2 { margin: 0 0 10px; font-size: 15px; }
+    .session-row {
+      display: grid; grid-template-columns: 1fr auto; gap: 12px;
+      padding: 9px 0; border-top: 1px solid var(--line); color: var(--muted);
+    }
+    .session-row strong { color: var(--text); }
+    @media (max-width: 900px) {
+      .viewer-grid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr 1fr; }
+      .info-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 560px) {
+      header, main { padding-left: 12px; padding-right: 12px; }
+      .controls, .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Orbbec RGB-D 数据采集</h1>
+      <div class="subtitle">RGB、原始深度、对齐深度与相机标定同步落盘</div>
+    </div>
+    <div id="cameraBadge" class="badge">连接中</div>
+  </header>
+
+  <main>
+    <section class="viewer-grid">
+      <article class="viewer">
+        <div class="viewer-head"><strong>RGB</strong><span id="rgbMeta">--</span></div>
+        <div class="image-stage">
+          <span class="waiting">等待彩色帧</span>
+          <img src="/stream/color.mjpg" alt="RGB 预览">
+        </div>
+      </article>
+      <article class="viewer">
+        <div class="viewer-head"><strong>深度预览</strong><span id="depthMeta">150–4000 mm</span></div>
+        <div class="image-stage">
+          <span class="waiting">等待深度帧</span>
+          <img src="/stream/depth.mjpg" alt="深度伪彩色预览">
+        </div>
+      </article>
+    </section>
+
+    <section class="card controls">
+      <label>会话名称
+        <input id="sessionName" value="capture" maxlength="64">
+      </label>
+      <label>连续采集间隔（秒）
+        <input id="interval" type="number" min="0.1" max="3600" step="0.1" value="1">
+      </label>
+      <label>最大帧数（留空=不限）
+        <input id="maxFrames" type="number" min="1" max="1000000" step="1" placeholder="不限">
+      </label>
+      <div class="buttons">
+        <button id="captureBtn" class="primary">拍摄一组</button>
+        <button id="startBtn" class="record">开始连续采集</button>
+        <button id="stopBtn" class="stop">停止连续采集</button>
+        <button id="closeBtn">结束当前会话</button>
+        <button id="restartBtn">重新连接相机</button>
+      </div>
+    </section>
+
+    <div id="message" class="message"></div>
+
+    <section class="info-grid">
+      <article class="card">
+        <h2>相机</h2><div id="deviceValue" class="value">--</div>
+        <div id="deviceDetail" class="details">--</div>
+      </article>
+      <article class="card">
+        <h2>采集状态</h2><div id="recordValue" class="value">未采集</div>
+        <div id="recordDetail" class="details">--</div>
+      </article>
+      <article class="card">
+        <h2>当前会话</h2><div id="sessionValue" class="value">尚未创建</div>
+        <div id="sessionDetail" class="details">首次保存时自动创建</div>
+      </article>
+      <article class="card">
+        <h2>存储</h2><div id="diskValue" class="value">--</div>
+        <div id="diskDetail" class="details">--</div>
+      </article>
+    </section>
+
+    <div class="notice">
+      网页中的深度是伪彩色预览。落盘的 depth_raw.png 和 depth_aligned.png
+      始终是未经归一化的 uint16 原始数值，实际毫米值 = 像素值 × depth_scale。
+    </div>
+
+    <section class="card sessions">
+      <h2>最近会话</h2>
+      <div id="sessionList" class="details">暂无会话</div>
+    </section>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    let latest = null;
+
+    function setMessage(text, type = "") {
+      const el = $("message");
+      el.textContent = text;
+      el.className = "message " + type;
+    }
+
+    async function api(path, body) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body || {}),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+      return data;
+    }
+
+    function profileText(profile) {
+      if (!profile) return "--";
+      return `${profile.width}×${profile.height}@${profile.fps} ${profile.format}`;
+    }
+
+    async function refreshStatus() {
+      try {
+        const status = await (await fetch("/api/status", {cache: "no-store"})).json();
+        latest = status;
+        const camera = status.camera || {};
+        const cameraOk = camera.running && !camera.start_error;
+        $("cameraBadge").textContent = cameraOk ? "相机独占中" : "相机未就绪";
+        $("cameraBadge").className = "badge " + (cameraOk ? "ok" : "error");
+        $("deviceValue").textContent = camera.device?.name || "未连接";
+        $("deviceDetail").textContent = camera.start_error ||
+          `${camera.device?.serial || "无序列号"} · ${camera.average_fps || 0} FPS · ${camera.frames || 0} 帧`;
+        $("rgbMeta").textContent = profileText(camera.color);
+        $("depthMeta").textContent = `${profileText(camera.depth)} · scale ${camera.depth_scale_mm ?? "?"} mm`;
+
+        const recording = status.recording || {};
+        $("recordValue").textContent = recording.active ? "连续采集中" : "已停止";
+        $("recordDetail").textContent = `已入队 ${recording.captured || 0} 组 · 间隔 ${recording.interval_s || 1}s` +
+          (recording.error ? ` · ${recording.error}` : "");
+
+        const session = status.session;
+        $("sessionValue").textContent = session ? session.id : "尚未创建";
+        $("sessionDetail").textContent = session
+          ? `已保存 ${session.saved} · 队列 ${session.queued} · 失败 ${session.failed} · 丢弃 ${session.dropped}`
+          : "首次保存时自动创建";
+        $("diskValue").textContent = status.disk ? `${status.disk.free_gb} GB 可用` : "--";
+        $("diskDetail").textContent = status.output_root || "--";
+
+        $("captureBtn").disabled = !cameraOk;
+        $("startBtn").disabled = !cameraOk || recording.active;
+        $("stopBtn").disabled = !recording.active;
+        $("closeBtn").disabled = recording.active || !session;
+      } catch (error) {
+        $("cameraBadge").textContent = "服务不可达";
+        $("cameraBadge").className = "badge error";
+        setMessage(error.message, "error");
+      }
+    }
+
+    async function refreshSessions() {
+      try {
+        const data = await (await fetch("/api/sessions", {cache: "no-store"})).json();
+        const list = data.sessions || [];
+        $("sessionList").innerHTML = list.length ? list.slice(0, 12).map(item => `
+          <div class="session-row">
+            <div><strong>${escapeHtml(item.name || item.id)}</strong><br>${escapeHtml(item.path)}</div>
+            <div>${item.frames} 组<br>${escapeHtml(item.created_at || "")}</div>
+          </div>`).join("") : "暂无会话";
+      } catch (_) {}
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[c]);
+    }
+
+    $("captureBtn").onclick = async () => {
+      try {
+        const result = await api("/api/capture", {session_name: $("sessionName").value});
+        setMessage(`已加入写盘队列：${result.frame_id}`, "ok");
+        await refreshStatus(); await refreshSessions();
+      } catch (error) { setMessage(error.message, "error"); }
+    };
+
+    $("startBtn").onclick = async () => {
+      try {
+        const rawMax = $("maxFrames").value.trim();
+        await api("/api/record/start", {
+          session_name: $("sessionName").value,
+          interval_s: Number($("interval").value),
+          max_frames: rawMax ? Number(rawMax) : null,
+        });
+        setMessage("连续采集已开始", "ok");
+        await refreshStatus();
+      } catch (error) { setMessage(error.message, "error"); }
+    };
+
+    $("stopBtn").onclick = async () => {
+      try {
+        await api("/api/record/stop");
+        setMessage("连续采集已停止；写盘队列会继续排空", "ok");
+        await refreshStatus(); await refreshSessions();
+      } catch (error) { setMessage(error.message, "error"); }
+    };
+
+    $("closeBtn").onclick = async () => {
+      try {
+        const result = await api("/api/session/close");
+        setMessage(result.session ? `会话已完整关闭：${result.session.id}` : "没有活动会话", "ok");
+        await refreshStatus(); await refreshSessions();
+      } catch (error) { setMessage(error.message, "error"); }
+    };
+
+    $("restartBtn").onclick = async () => {
+      try {
+        setMessage("正在重新连接相机…");
+        await api("/api/camera/restart");
+        document.querySelectorAll(".image-stage img").forEach(img => {
+          img.src = img.src.split("?")[0] + "?" + Date.now();
+        });
+        setMessage("相机已重新连接", "ok");
+        await refreshStatus();
+      } catch (error) { setMessage(error.message, "error"); }
+    };
+
+    setInterval(refreshStatus, 1000);
+    setInterval(refreshSessions, 5000);
+    refreshStatus();
+    refreshSessions();
+  </script>
+</body>
+</html>

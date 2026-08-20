@@ -31,6 +31,77 @@ SEMANTIC_PALETTE = np.array(
 )
 
 
+def detection_pixel_mask(
+    u: np.ndarray,
+    v: np.ndarray,
+    detection: dict[str, Any],
+    *,
+    image_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """Return membership in an instance mask, falling back to its box."""
+    u_values = np.asarray(u)
+    v_values = np.asarray(v)
+    if u_values.shape != v_values.shape:
+        raise ValueError("u/v 像素数组尺寸不一致")
+
+    polygon_value = detection.get("polygon")
+    if polygon_value is not None:
+        try:
+            polygon = np.asarray(polygon_value, dtype=np.float32)
+        except (TypeError, ValueError):
+            polygon = np.empty((0, 2), dtype=np.float32)
+        if (
+            polygon.ndim == 2
+            and polygon.shape[0] >= 3
+            and polygon.shape[1] == 2
+            and np.isfinite(polygon).all()
+        ):
+            if image_shape is None:
+                finite_u = u_values[np.isfinite(u_values)]
+                finite_v = v_values[np.isfinite(v_values)]
+                max_u = max(
+                    float(np.max(finite_u)) if finite_u.size else 0.0,
+                    float(np.max(polygon[:, 0])),
+                )
+                max_v = max(
+                    float(np.max(finite_v)) if finite_v.size else 0.0,
+                    float(np.max(polygon[:, 1])),
+                )
+                height, width = int(np.ceil(max_v)) + 2, int(np.ceil(max_u)) + 2
+            else:
+                height, width = image_shape
+            if height > 0 and width > 0:
+                raster = np.zeros((height, width), dtype=np.uint8)
+                contour = np.rint(polygon).astype(np.int32)
+                cv2.fillPoly(raster, [contour], 1)
+                finite = np.isfinite(u_values) & np.isfinite(v_values)
+                pixel_u = np.zeros(u_values.shape, dtype=np.int64)
+                pixel_v = np.zeros(v_values.shape, dtype=np.int64)
+                pixel_u[finite] = np.rint(u_values[finite]).astype(np.int64)
+                pixel_v[finite] = np.rint(v_values[finite]).astype(np.int64)
+                valid = (
+                    finite
+                    & (pixel_u >= 0)
+                    & (pixel_u < width)
+                    & (pixel_v >= 0)
+                    & (pixel_v < height)
+                )
+                inside = np.zeros(u_values.shape, dtype=bool)
+                inside[valid] = raster[pixel_v[valid], pixel_u[valid]] != 0
+                return inside
+
+    try:
+        x1, y1, x2, y2 = [float(value) for value in detection["xyxy"]]
+    except (KeyError, TypeError, ValueError):
+        return np.zeros(u_values.shape, dtype=bool)
+    return (
+        (u_values >= x1)
+        & (u_values <= x2)
+        & (v_values >= y1)
+        & (v_values <= y2)
+    )
+
+
 def _safe_child(parent: Path, name: str) -> Path:
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
         raise ValueError("非法目录名称")
@@ -208,10 +279,11 @@ def reconstruct_frame(
         for box in sorted(boxes, key=lambda item: float(item.get("conf", 0.0))):
             try:
                 cls = int(box["cls"])
-                x1, y1, x2, y2 = [float(value) for value in box["xyxy"]]
             except (KeyError, TypeError, ValueError):
                 continue
-            inside = (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
+            inside = detection_pixel_mask(
+                u, v, box, image_shape=depth.shape
+            )
             class_ids[inside] = cls
             semantic_rgb[inside] = SEMANTIC_PALETTE[
                 cls % len(SEMANTIC_PALETTE)
@@ -266,6 +338,7 @@ def reconstruct_frame(
         "stride": stride,
         "depth_range_m": [min_depth_m, max_depth_m],
         "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+        "image_shape": [int(color.shape[0]), int(color.shape[1])],
         "color_distortion_compensated": bool(
             coefficients.size in {4, 5, 8, 12, 14}
             and np.any(np.abs(coefficients) > 1e-12)

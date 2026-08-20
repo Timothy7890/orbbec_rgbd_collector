@@ -9,7 +9,11 @@ from typing import Any
 
 import numpy as np
 
-from .pointcloud import reconstruct_frame, resolve_frame_paths
+from .pointcloud import (
+    detection_pixel_mask,
+    reconstruct_frame,
+    resolve_frame_paths,
+)
 
 
 def fit_dominant_plane(
@@ -168,13 +172,21 @@ def semantic_clusters(
     origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
     normal = np.asarray(plane["normal_camera"], dtype=np.float64)
     protrusion = (points - origin) @ normal
+    shape_value = metadata.get("image_shape")
+    image_shape = (
+        (int(shape_value[0]), int(shape_value[1]))
+        if isinstance(shape_value, (list, tuple)) and len(shape_value) == 2
+        else None
+    )
     clusters: list[dict[str, Any]] = []
     for index, box in enumerate(boxes):
         try:
             x1, y1, x2, y2 = [float(value) for value in box["xyxy"]]
         except (KeyError, TypeError, ValueError):
             continue
-        inside = (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
+        inside = detection_pixel_mask(
+            u, v, box, image_shape=image_shape
+        )
         object_mask = inside & (protrusion >= 0.003) & (protrusion <= 0.15)
         if int(object_mask.sum()) < 12:
             object_mask = inside

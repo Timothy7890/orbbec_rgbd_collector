@@ -6,6 +6,7 @@ from threading import Lock
 from typing import Any
 
 import cv2
+import numpy as np
 
 from .pointcloud import resolve_frame_paths
 
@@ -41,6 +42,11 @@ class OfflineYolo:
                 self.model_path and self.model_path.is_file()
             ),
             "loaded": self._model is not None,
+            "task": (
+                getattr(self._model, "task", None)
+                if self._model is not None
+                else None
+            ),
             "confidence": self.confidence,
             "device": self.device,
         }
@@ -92,13 +98,14 @@ class OfflineYolo:
                 kwargs["device"] = self.device
             result = model.predict(**kwargs)[0]
             names = result.names
+            polygons = result.masks.xy if result.masks is not None else []
             boxes: list[dict[str, Any]] = []
             if result.boxes is not None:
-                for xyxy, confidence, class_id in zip(
+                for index, (xyxy, confidence, class_id) in enumerate(zip(
                     result.boxes.xyxy.cpu().numpy(),
                     result.boxes.conf.cpu().numpy(),
                     result.boxes.cls.cpu().numpy(),
-                ):
+                )):
                     cls = int(class_id)
                     if isinstance(names, dict):
                         name = names.get(cls, cls)
@@ -106,14 +113,22 @@ class OfflineYolo:
                         name = names[cls]
                     else:
                         name = cls
-                    boxes.append(
-                        {
-                            "cls": cls,
-                            "name": str(name),
-                            "conf": float(confidence),
-                            "xyxy": [float(value) for value in xyxy],
-                        }
-                    )
+                    detection = {
+                        "cls": cls,
+                        "name": str(name),
+                        "conf": float(confidence),
+                        "xyxy": [float(value) for value in xyxy],
+                    }
+                    if index < len(polygons):
+                        polygon = np.asarray(polygons[index], dtype=np.float32)
+                        if (
+                            polygon.ndim == 2
+                            and polygon.shape[0] >= 3
+                            and polygon.shape[1] == 2
+                            and np.isfinite(polygon).all()
+                        ):
+                            detection["polygon"] = polygon.tolist()
+                    boxes.append(detection)
             self._cache[key] = boxes
             while len(self._cache) > 64:
                 self._cache.popitem(last=False)

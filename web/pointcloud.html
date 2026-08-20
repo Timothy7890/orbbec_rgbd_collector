@@ -63,7 +63,6 @@
     }
     .stage { position: relative; min-width: 0; background: #040609; }
     canvas { width: 100%; height: 100%; display: block; cursor: grab; }
-    .stage.rgb-open canvas { width: 54%; }
     canvas:active { cursor: grabbing; }
     .hud {
       position: absolute; left: 14px; bottom: 12px; padding: 7px 10px;
@@ -77,11 +76,9 @@
       transform: translate(-50%, -50%); pointer-events: none; display: none;
     }
     .rgb-picker {
-      position: absolute; z-index: 5; top: 14px; right: 14px;
-      width: calc(46% - 21px); min-width: 360px; padding: 10px;
-      border: 1px solid var(--line); border-radius: 10px;
-      background: rgba(13,17,24,.96); box-shadow: 0 12px 40px rgba(0,0,0,.45);
-      max-height: calc(100% - 28px); overflow-y: auto;
+      position: fixed; z-index: 100; inset: 0; padding: 14px;
+      display: flex; flex-direction: column;
+      background: rgba(6,9,13,.98);
     }
     .rgb-picker[hidden] { display: none; }
     .rgb-head {
@@ -89,16 +86,27 @@
       gap: 10px; margin-bottom: 8px;
     }
     .rgb-head button { width: auto; padding: 5px 10px; margin-top: 0; }
-    .rgb-image-wrap { position: relative; width: 100%; line-height: 0; }
+    .rgb-image-wrap {
+      position: relative; flex: 1; min-height: 0; width: 100%; line-height: 0;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
+    }
     .rgb-image-wrap img {
-      display: block; width: 100%; height: auto;
+      display: block; width: auto; height: auto; max-width: 100%; max-height: 100%;
       background: #05070a; cursor: crosshair;
     }
-    .rgb-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .rgb-overlay { position: absolute; pointer-events: none; }
+    .rgb-mask-svg {
+      position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible;
+    }
+    .rgb-mask-shape {
+      fill: rgba(77, 214, 154, .24); stroke: var(--green); stroke-width: 2;
+      vector-effect: non-scaling-stroke;
+    }
     .rgb-box {
       position: absolute; border: 2px solid var(--green);
       color: #07130e; background: transparent;
     }
+    .rgb-box.mask-box { border-color: rgba(77, 214, 154, .28); }
     .rgb-box span {
       position: absolute; left: -2px; top: -20px; padding: 2px 5px;
       background: var(--green); font: 11px/1.35 sans-serif; white-space: nowrap;
@@ -115,8 +123,7 @@
       .layout { display: flex; flex-direction: column; height: auto; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .stage { height: 65vh; }
-      .stage.rgb-open canvas { width: 100%; }
-      .rgb-picker { min-width: 0; width: calc(100% - 20px); right: 10px; top: 10px; }
+      .rgb-picker { padding: 8px; }
     }
   </style>
 </head>
@@ -164,7 +171,6 @@
       </label>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
-      <button id="pickBtn" class="secondary">点选三维目标</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
@@ -172,7 +178,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧。A/D 调 X，W/S 调 Y，Q/E 调 Z。左键拖动旋转，滚轮缩放。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧。直接单击点云选点；左键拖动旋转，右键拖动平移，滚轮缩放。A/D 调 X，W/S 调 Y，Q/E 调 Z。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -208,6 +214,7 @@
       uniform float uDistance;
       uniform float uAspect;
       uniform float uPointSize;
+      uniform vec2 uPan;
       varying vec4 vColor;
       void main() {
         vec3 p = aPosition - uCenter;
@@ -221,12 +228,13 @@
         float z2 = sp * p.y + cp * z1 - uDistance;
         float nearZ = 0.01, farZ = 100.0;
         float f = 1.7320508;
+        float clipW = -z2;
         gl_Position = vec4(
-          f * x1 / uAspect,
-          f * y2,
+          f * x1 / uAspect + uPan.x * clipW,
+          f * y2 + uPan.y * clipW,
           ((farZ + nearZ) / (nearZ - farZ)) * z2 +
             (2.0 * farZ * nearZ / (nearZ - farZ)),
-          -z2
+          clipW
         );
         gl_PointSize = uPointSize;
         vColor = aColor;
@@ -264,13 +272,15 @@
       distance: gl.getUniformLocation(program, "uDistance"),
       aspect: gl.getUniformLocation(program, "uAspect"),
       pointSize: gl.getUniformLocation(program, "uPointSize"),
+      pan: gl.getUniformLocation(program, "uPan"),
     };
     const buffer = gl.createBuffer();
     let pointCount = 0;
     let cloudView = null;
     let center = [0, 0, 0], radius = 1;
     let yaw = 0, pitch = 0, distance = 2;
-    let selectedTarget = null, currentAnalysis = null, pickMode = false;
+    let panX = 0, panY = 0;
+    let selectedTarget = null, currentAnalysis = null;
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
     const selectionStorageKey = "rgbd-pointcloud-selection";
@@ -294,6 +304,7 @@
 
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
+      panX = 0; panY = 0;
     }
 
     function resize() {
@@ -324,6 +335,7 @@
         gl.uniform1f(locations.distance, distance);
         gl.uniform1f(locations.aspect, canvas.width / canvas.height);
         gl.uniform1f(locations.pointSize, Number($("pointSize").value));
+        gl.uniform2f(locations.pan, panX, panY);
         gl.drawArrays(gl.POINTS, 0, pointCount);
       }
       updateTargetMarker();
@@ -418,7 +430,6 @@
       selectionSource = "pointcloud";
       targetAdjustment = [0, 0, 0];
       currentAnalysis = null;
-      setPickMode(false);
       await loadSavedAnnotation();
       if (!$("rgbPicker").hidden) await loadRgbImage();
     }
@@ -448,7 +459,7 @@
       renderRgbOverlay();
       setStatus("分析完成", false,
         `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
-        `YOLO ${currentAnalysis.yolo.boxes.length} 个框`);
+        `YOLO ${currentAnalysis.yolo.boxes.length} 个实例`);
     }
 
     async function saveCurrentAnnotation() {
@@ -527,8 +538,11 @@
         lines.push(`柜面法向: ${p.normal_camera.map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
       }
-      if (currentAnalysis?.yolo)
-        lines.push(`YOLO 框: ${currentAnalysis.yolo.boxes.length}`);
+      if (currentAnalysis?.yolo) {
+        const instances = currentAnalysis.yolo.boxes;
+        const masks = instances.filter(item => item.polygon?.length >= 3).length;
+        lines.push(`YOLO 实例: ${instances.length}（Mask ${masks}）`);
+      }
       if (local)
         lines.push(`柜面坐标 mm: H ${(local.horizontal_m * 1000).toFixed(1)}, V ${(local.vertical_m * 1000).toFixed(1)}, N ${(local.normal_m * 1000).toFixed(1)}`);
       if (semanticLocal)
@@ -537,18 +551,10 @@
       $("analysis").textContent = lines.length ? lines.join("\n") : "尚未分析或点选";
     }
 
-    function setPickMode(active) {
-      pickMode = active;
-      $("pickBtn").className = active ? "secondary pick-active" : "secondary";
-      $("pickBtn").textContent = active ? "请在点云中单击目标…" : "点选三维目标";
-      canvas.style.cursor = active ? "crosshair" : "grab";
-    }
-
     async function openRgbPicker() {
       if (!$("session").value || !$("frame").value)
         throw new Error("请先选择会话和帧");
       $("rgbPicker").hidden = false;
-      $("stage").classList.add("rgb-open");
       await loadRgbImage();
     }
 
@@ -572,10 +578,31 @@
       const image = $("rgbImage");
       overlay.replaceChildren();
       if (!image.naturalWidth || !image.naturalHeight) return;
+      overlay.style.left = `${image.offsetLeft}px`;
+      overlay.style.top = `${image.offsetTop}px`;
+      overlay.style.width = `${image.clientWidth}px`;
+      overlay.style.height = `${image.clientHeight}px`;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.classList.add("rgb-mask-svg");
+      svg.setAttribute("viewBox", `0 0 ${image.naturalWidth} ${image.naturalHeight}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      overlay.appendChild(svg);
       for (const box of currentAnalysis?.yolo?.boxes || []) {
         const [x1, y1, x2, y2] = box.xyxy;
+        const hasMask = box.polygon?.length >= 3;
+        if (hasMask) {
+          const polygon = document.createElementNS(
+            "http://www.w3.org/2000/svg", "polygon"
+          );
+          polygon.classList.add("rgb-mask-shape");
+          polygon.setAttribute(
+            "points",
+            box.polygon.map(point => `${point[0]},${point[1]}`).join(" ")
+          );
+          svg.appendChild(polygon);
+        }
         const element = document.createElement("div");
-        element.className = "rgb-box";
+        element.className = "rgb-box" + (hasMask ? " mask-box" : "");
         element.style.left = `${x1 / image.naturalWidth * 100}%`;
         element.style.top = `${y1 / image.naturalHeight * 100}%`;
         element.style.width = `${(x2 - x1) / image.naturalWidth * 100}%`;
@@ -623,7 +650,6 @@
       selectedPixel = data.used_pixel;
       selectionSource = "rgb";
       targetAdjustment = [0, 0, 0];
-      setPickMode(false);
       updateAnalysisPanel();
       renderRgbOverlay();
       const shifted = data.search_distance_px > 0
@@ -647,8 +673,8 @@
       const z2 = sp * y + cp * z1 - distance;
       if (z2 >= -0.01) return null;
       const f = 1.7320508;
-      const ndcX = (f * x1 / (canvas.width / canvas.height)) / -z2;
-      const ndcY = (f * y2) / -z2;
+      const ndcX = (f * x1 / (canvas.width / canvas.height)) / -z2 + panX;
+      const ndcY = (f * y2) / -z2 + panY;
       if (Math.abs(ndcX) > 1.05 || Math.abs(ndcY) > 1.05) return null;
       return [
         (ndcX * 0.5 + 0.5) * canvas.clientWidth,
@@ -686,7 +712,6 @@
       targetAdjustment = [0, 0, 0];
       updateAnalysisPanel();
       renderRgbOverlay();
-      setPickMode(false);
       setStatus("已点选三维目标", false, best.map(v => v.toFixed(4)).join(", ") + " m");
     }
 
@@ -801,24 +826,38 @@
       frames.dispatchEvent(new Event("change"));
     });
     canvas.ondblclick = () => { if (!pickMode) resetView(); };
-    let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0;
+    canvas.oncontextmenu = event => event.preventDefault();
+    let dragMode = null, lastX = 0, lastY = 0, downX = 0, downY = 0;
     canvas.onpointerdown = event => {
-      dragging = !pickMode;
+      dragMode = event.button === 2
+        ? "pan"
+        : (event.button === 0 && !pickMode ? "rotate" : null);
       lastX = downX = event.clientX;
       lastY = downY = event.clientY;
-      canvas.setPointerCapture(event.pointerId);
+      if (dragMode || (pickMode && event.button === 0))
+        canvas.setPointerCapture(event.pointerId);
+      if (dragMode === "pan") canvas.style.cursor = "move";
     };
     canvas.onpointerup = event => {
-      dragging = false;
-      if (pickMode && Math.hypot(event.clientX - downX, event.clientY - downY) < 5) {
+      const completedMode = dragMode;
+      dragMode = null;
+      canvas.style.cursor = pickMode ? "crosshair" : "grab";
+      if (pickMode && event.button === 0 && !completedMode &&
+          Math.hypot(event.clientX - downX, event.clientY - downY) < 5) {
         try { pickTargetAt(event.clientX, event.clientY); }
         catch (error) { setStatus(error.message, true); }
       }
     };
     canvas.onpointermove = event => {
-      if (!dragging) return;
-      yaw += (event.clientX - lastX) * 0.008;
-      pitch = Math.max(-1.5, Math.min(1.5, pitch + (event.clientY - lastY) * 0.008));
+      if (!dragMode) return;
+      const dx = event.clientX - lastX, dy = event.clientY - lastY;
+      if (dragMode === "rotate") {
+        yaw += dx * 0.008;
+        pitch = Math.max(-1.5, Math.min(1.5, pitch + dy * 0.008));
+      } else {
+        panX += 2 * dx / Math.max(canvas.clientWidth, 1);
+        panY -= 2 * dy / Math.max(canvas.clientHeight, 1);
+      }
       lastX = event.clientX; lastY = event.clientY;
     };
     canvas.onwheel = event => {

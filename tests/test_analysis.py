@@ -147,6 +147,45 @@ class AnalysisTests(unittest.TestCase):
             clusters[0]["centroid_camera_m"][2], 0.95, places=3
         )
 
+    def test_semantic_cluster_uses_instance_polygon(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "normal_camera": [0.0, 0.0, -1.0],
+            "horizontal_axis_camera": [1.0, 0.0, 0.0],
+            "vertical_axis_camera": [0.0, 1.0, 0.0],
+        }
+        pixels = np.array(
+            [[102, 102], [103, 102], [102, 103], [116, 116], [117, 116], [116, 117]],
+            dtype=np.float64,
+        )
+        z = np.full(pixels.shape[0], 0.95)
+        points = np.column_stack(
+            (
+                (pixels[:, 0] - 100) * z / 100,
+                (pixels[:, 1] - 100) * z / 100,
+                z,
+            )
+        )
+        clusters = semantic_clusters(
+            points,
+            {
+                "intrinsics": {"fx": 100, "fy": 100, "cx": 100, "cy": 100},
+                "image_shape": [200, 200],
+            },
+            [
+                {
+                    "cls": 1,
+                    "name": "switch",
+                    "conf": 0.9,
+                    "xyxy": [100, 100, 120, 120],
+                    "polygon": [[100, 100], [106, 100], [100, 106]],
+                }
+            ],
+            plane,
+        )
+        self.assertEqual(clusters[0]["point_count"], 3)
+        self.assertLess(clusters[0]["centroid_camera_m"][0], 0.04)
+
 
 if __name__ == "__main__":
     unittest.main()

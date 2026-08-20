@@ -75,6 +75,13 @@
       border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(255,107,114,.28);
       transform: translate(-50%, -50%); pointer-events: none; display: none;
     }
+    .semantic-marker {
+      position: absolute; z-index: 3; transform: translate(-50%, -115%);
+      padding: 3px 7px; border: 1px solid var(--green); border-radius: 5px;
+      background: rgba(7, 19, 14, .88); color: var(--green);
+      font: 600 12px/1.35 sans-serif; white-space: nowrap;
+      pointer-events: none;
+    }
     .rgb-picker {
       position: fixed; z-index: 100; inset: 0; padding: 14px;
       display: flex; flex-direction: column;
@@ -185,6 +192,7 @@
       <canvas id="canvas"></canvas>
       <div id="hud" class="hud">0 points</div>
       <div id="targetMarker" class="target-marker"></div>
+      <div id="semanticMarkers"></div>
       <div id="rgbPicker" class="rgb-picker" hidden>
         <div class="rgb-head">
           <strong>RGB 选点</strong>
@@ -283,6 +291,7 @@
     let selectedTarget = null, currentAnalysis = null;
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
+    let semanticMarkers = [];
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
     function savedSelection() {
@@ -339,6 +348,7 @@
         gl.drawArrays(gl.POINTS, 0, pointCount);
       }
       updateTargetMarker();
+      updateSemanticMarkers();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
@@ -430,8 +440,10 @@
       selectionSource = "pointcloud";
       targetAdjustment = [0, 0, 0];
       currentAnalysis = null;
+      rebuildSemanticMarkers();
       await loadSavedAnnotation();
       if (!$("rgbPicker").hidden) await loadRgbImage();
+      if ($("semantic").checked) await analyzeCurrent();
     }
 
     function analysisOptions() {
@@ -456,6 +468,7 @@
       );
       currentAnalysis = data.analysis;
       updateAnalysisPanel();
+      rebuildSemanticMarkers();
       renderRgbOverlay();
       setStatus("分析完成", false,
         `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
@@ -484,6 +497,7 @@
         plane: data.annotation.plane,
         yolo: data.annotation.yolo,
       };
+      rebuildSemanticMarkers();
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
@@ -519,6 +533,7 @@
       } else {
         updateAnalysisPanel();
       }
+      rebuildSemanticMarkers();
       renderRgbOverlay();
     }
 
@@ -731,6 +746,33 @@
       marker.style.top = `${position[1]}px`;
     }
 
+    function rebuildSemanticMarkers() {
+      const container = $("semanticMarkers");
+      container.replaceChildren();
+      semanticMarkers = [];
+      if (!$("semantic").checked) return;
+      for (const cluster of currentAnalysis?.yolo?.clusters || []) {
+        const point = cluster.centroid_camera_m;
+        if (!Array.isArray(point) || point.length !== 3) continue;
+        const element = document.createElement("div");
+        element.className = "semantic-marker";
+        element.textContent =
+          `${cluster.name} ${(Number(cluster.conf || 0) * 100).toFixed(0)}%`;
+        container.appendChild(element);
+        semanticMarkers.push({element, point});
+      }
+    }
+
+    function updateSemanticMarkers() {
+      for (const marker of semanticMarkers) {
+        const position = projectPosition(marker.point);
+        marker.element.style.display = position ? "block" : "none";
+        if (!position) continue;
+        marker.element.style.left = `${position[0]}px`;
+        marker.element.style.top = `${position[1]}px`;
+      }
+    }
+
     function nudgeTarget(code) {
       const commands = {
         KeyA: [0, -1], KeyD: [0, 1],
@@ -786,11 +828,9 @@
     $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
     $("semantic").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
-    $("pickBtn").onclick = () => setPickMode(!pickMode);
     $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
     $("closeRgbBtn").onclick = () => {
       $("rgbPicker").hidden = true;
-      $("stage").classList.remove("rgb-open");
     };
     $("rgbImage").onclick = event =>
       selectRgbPixel(event).catch(error => {
@@ -802,6 +842,11 @@
     $("resetBtn").onclick = resetView;
     document.addEventListener("keydown", event => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.code === "Escape" && !$("rgbPicker").hidden) {
+        $("rgbPicker").hidden = true;
+        event.preventDefault();
+        return;
+      }
       const target = event.target;
       if (target instanceof HTMLElement &&
           (target.matches("input, textarea") || target.isContentEditable)) return;
@@ -825,24 +870,22 @@
       frames.selectedIndex = next;
       frames.dispatchEvent(new Event("change"));
     });
-    canvas.ondblclick = () => { if (!pickMode) resetView(); };
+    canvas.ondblclick = resetView;
     canvas.oncontextmenu = event => event.preventDefault();
     let dragMode = null, lastX = 0, lastY = 0, downX = 0, downY = 0;
     canvas.onpointerdown = event => {
       dragMode = event.button === 2
         ? "pan"
-        : (event.button === 0 && !pickMode ? "rotate" : null);
+        : (event.button === 0 ? "rotate" : null);
       lastX = downX = event.clientX;
       lastY = downY = event.clientY;
-      if (dragMode || (pickMode && event.button === 0))
-        canvas.setPointerCapture(event.pointerId);
+      if (dragMode) canvas.setPointerCapture(event.pointerId);
       if (dragMode === "pan") canvas.style.cursor = "move";
     };
     canvas.onpointerup = event => {
-      const completedMode = dragMode;
       dragMode = null;
-      canvas.style.cursor = pickMode ? "crosshair" : "grab";
-      if (pickMode && event.button === 0 && !completedMode &&
+      canvas.style.cursor = "grab";
+      if (event.button === 0 &&
           Math.hypot(event.clientX - downX, event.clientY - downY) < 5) {
         try { pickTargetAt(event.clientX, event.clientY); }
         catch (error) { setStatus(error.message, true); }
@@ -864,7 +907,10 @@
       event.preventDefault();
       distance = Math.max(0.02, distance * Math.exp(event.deltaY * 0.001));
     };
-    window.onresize = resize;
+    window.onresize = () => {
+      resize();
+      if (!$("rgbPicker").hidden) renderRgbOverlay();
+    };
 
     refreshSessions(true)
       .then(() => $("frame").value && loadCloud())

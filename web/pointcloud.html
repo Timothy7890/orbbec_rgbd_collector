@@ -71,9 +71,18 @@
       backdrop-filter: blur(8px);
     }
     .target-marker {
-      position: absolute; width: 18px; height: 18px; border: 2px solid #fff;
+      position: absolute; z-index: 4; width: 18px; height: 18px; border: 2px solid #fff;
       border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(255,107,114,.28);
       transform: translate(-50%, -50%); pointer-events: none; display: none;
+    }
+    .target-marker.saved-target {
+      background: var(--green); box-shadow: 0 0 0 3px rgba(77,214,154,.28);
+    }
+    .target-marker::after {
+      content: attr(data-label); position: absolute; left: 50%; bottom: 22px;
+      transform: translateX(-50%); padding: 3px 7px; border-radius: 5px;
+      background: rgba(10,13,18,.9); color: white;
+      font: 600 12px/1.35 sans-serif; white-space: nowrap;
     }
     .semantic-marker {
       position: absolute; z-index: 3; transform: translate(-50%, -115%);
@@ -291,6 +300,7 @@
     let selectedTarget = null, currentAnalysis = null;
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
+    let targetSaved = false;
     let semanticMarkers = [];
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
@@ -401,7 +411,7 @@
       rememberSelection();
     }
 
-    async function loadCloud() {
+    async function loadCloud({preserveView = false} = {}) {
       const session = $("session").value, frame = $("frame").value;
       if (!session || !frame) return setStatus("请先选择会话和帧", true);
       setStatus("点云重建中…");
@@ -431,7 +441,7 @@
       cloudView = view;
       center = (response.headers.get("X-Cloud-Center") || "0,0,0").split(",").map(Number);
       radius = Number(response.headers.get("X-Cloud-Radius")) || 1;
-      resetView();
+      if (!preserveView) resetView();
       $("hud").textContent = `${pointCount.toLocaleString()} points · stride ${response.headers.get("X-Cloud-Stride")}`;
       setStatus(`${pointCount.toLocaleString()} 个点`, false,
         `${session}<br>${frame}<br>包围半径 ${radius.toFixed(3)} m`);
@@ -439,6 +449,7 @@
       selectedPixel = null;
       selectionSource = "pointcloud";
       targetAdjustment = [0, 0, 0];
+      targetSaved = false;
       currentAnalysis = null;
       rebuildSemanticMarkers();
       await loadSavedAnnotation();
@@ -501,6 +512,7 @@
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
+      targetSaved = true;
       targetAdjustment =
         data.annotation.target_adjustment_camera_m || targetAdjustment;
       updateAnalysisPanel(
@@ -522,6 +534,7 @@
         selectedTarget = saved.target_camera_m;
         selectedPixel = saved.target_pixel || null;
         selectionSource = saved.selection_source || "pointcloud";
+        targetSaved = true;
         targetAdjustment =
           saved.target_adjustment_camera_m || [0, 0, 0];
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
@@ -531,6 +544,7 @@
           saved.target_relative_to_semantic_m
         );
       } else {
+        targetSaved = false;
         updateAnalysisPanel();
       }
       rebuildSemanticMarkers();
@@ -664,6 +678,7 @@
       selectedTarget = data.point_camera_m;
       selectedPixel = data.used_pixel;
       selectionSource = "rgb";
+      targetSaved = false;
       targetAdjustment = [0, 0, 0];
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -724,6 +739,7 @@
       selectedTarget = best;
       selectedPixel = null;
       selectionSource = "pointcloud";
+      targetSaved = false;
       targetAdjustment = [0, 0, 0];
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -742,6 +758,8 @@
         return;
       }
       marker.style.display = "block";
+      marker.classList.toggle("saved-target", targetSaved);
+      marker.dataset.label = targetSaved ? "已保存点" : "当前点";
       marker.style.left = `${position[0]}px`;
       marker.style.top = `${position[1]}px`;
     }
@@ -826,7 +844,8 @@
       loadCloud().catch(e => setStatus(e.message, true));
     };
     $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
-    $("semantic").onchange = () => loadCloud().catch(e => setStatus(e.message, true));
+    $("semantic").onchange = () =>
+      loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
     $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
     $("closeRgbBtn").onclick = () => {

@@ -315,7 +315,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。勾选“YOLO Mask 内面板拟合”后，才会对最高置信度实例额外拟合局部平面，并显示一条完整长边和一条相邻短边；关闭时不会执行该算法。点击“算法找点”或按 Tab，会根据所选版本和检测类别生成对应点位初值；0.2.0-s 对“远方”生成点1，对“就地”生成点3。生成后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。勾选“YOLO Mask 内面板拟合”后，才会对最高置信度实例额外拟合局部平面，并显示一条完整长边和一条相邻短边；关闭时不会执行该算法。点击“算法找点”或按 Tab，会根据所选版本和检测类别生成对应点位初值；0.3.0-s 在当前槽为2时生成点2，在当前槽为1或3时按“远方/就地”自动切换到点1或点3。生成后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -764,6 +764,9 @@
             ? "面板中心" : "YOLO中心"}）`;
         option.dataset.requiresSavedCoordinate =
           model.requires_saved_wall_coordinate ? "true" : "false";
+        option.dataset.allowedRequestedSlots = JSON.stringify(
+          model.allowed_requested_point_slots || []
+        );
         select.appendChild(option);
       }
       select.value = data.default_version || select.options[0]?.value || "";
@@ -778,6 +781,16 @@
       if (!wallAxes(currentAnalysis?.plane))
         throw new Error("请先等待当前帧坐标系与 YOLO 分析完成");
       const selectedModel = $("targetFinderVersion").selectedOptions[0];
+      const allowedRequestedSlots = JSON.parse(
+        selectedModel?.dataset.allowedRequestedSlots || "[]"
+      );
+      if (
+        allowedRequestedSlots.length &&
+        !allowedRequestedSlots.includes(activePointSlot)
+      )
+        throw new Error(
+          `算法 ${version} 只响应点位槽 ${allowedRequestedSlots.join("、")}`
+        );
       if (
           selectedModel?.dataset.requiresSavedCoordinate === "true" &&
           !currentAnalysis?.plane?.calibrated)
@@ -791,6 +804,7 @@
           body: JSON.stringify({
             ...analysisOptions(),
             version,
+            requested_point_slot: activePointSlot,
             plane: currentAnalysis.plane,
           }),
         }

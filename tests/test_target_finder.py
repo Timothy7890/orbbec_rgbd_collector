@@ -238,6 +238,111 @@ class TargetFinderTests(unittest.TestCase):
                 },
             )
 
+    def test_version_0_3_0_s_generates_point_two_only_when_requested(self) -> None:
+        plane = {
+            "calibrated": True,
+            "origin_camera_m": [1.0, 2.0, 3.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 1.0, 0.0],
+            "z_axis_camera": [0.0, 0.0, 1.0],
+        }
+        panel_center_wall = np.array([0.12, -0.01, 0.20])
+        point_two_offset = np.array(
+            [
+                0.3955939570123764,
+                -0.0019938704444295305,
+                0.20214201389586847,
+            ]
+        )
+        expected_camera = (
+            np.asarray(plane["origin_camera_m"])
+            + panel_center_wall
+            + point_two_offset
+        )
+        prediction = predict_target_one(
+            None,
+            version="0.3.0-s",
+            requested_point_slot=2,
+            reference_targets_camera_m={"2": expected_camera.tolist()},
+            panel_fit={
+                "available": True,
+                "rectangle_center_camera_m": (
+                    np.asarray(plane["origin_camera_m"])
+                    + panel_center_wall
+                ).tolist(),
+                "detection": {"name": "就地", "conf": 0.95},
+            },
+            plane=plane,
+        )
+
+        self.assertEqual(prediction["requested_point_slot"], 2)
+        self.assertEqual(prediction["target_point_slot"], 2)
+        np.testing.assert_allclose(
+            prediction["offset_wall_m"], point_two_offset, atol=1e-12
+        )
+        self.assertEqual(
+            prediction["validation"]["reference_point_slot"], 2
+        )
+        self.assertAlmostEqual(
+            prediction["validation"]["error_distance_m"], 0.0
+        )
+
+    def test_version_0_3_0_s_slot_one_or_three_uses_detection_class(self) -> None:
+        plane = {
+            "calibrated": True,
+            "origin_camera_m": [1.0, 2.0, 3.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 1.0, 0.0],
+            "z_axis_camera": [0.0, 0.0, 1.0],
+        }
+        panel_center_camera = [1.12, 1.99, 3.20]
+
+        remote = predict_target_one(
+            None,
+            version="0.3.0-s",
+            requested_point_slot=3,
+            panel_fit={
+                "available": True,
+                "rectangle_center_camera_m": panel_center_camera,
+                "detection": {"name": "远方", "conf": 0.95},
+            },
+            plane=plane,
+        )
+        local = predict_target_one(
+            None,
+            version="0.3.0-s",
+            requested_point_slot=1,
+            panel_fit={
+                "available": True,
+                "rectangle_center_camera_m": panel_center_camera,
+                "detection": {"name": "就地", "conf": 0.95},
+            },
+            plane=plane,
+        )
+
+        self.assertEqual(remote["target_point_slot"], 1)
+        self.assertEqual(local["target_point_slot"], 3)
+
+    def test_version_0_3_0_s_ignores_slots_above_three(self) -> None:
+        with self.assertRaisesRegex(ValueError, "只响应当前点位槽"):
+            predict_target_one(
+                None,
+                version="0.3.0-s",
+                requested_point_slot=4,
+                panel_fit={
+                    "available": True,
+                    "rectangle_center_camera_m": [0.0, 0.0, 1.0],
+                    "detection": {"name": "远方", "conf": 0.95},
+                },
+                plane={
+                    "calibrated": True,
+                    "origin_camera_m": [0.0, 0.0, 0.0],
+                    "x_axis_camera": [1.0, 0.0, 0.0],
+                    "y_axis_camera": [0.0, 1.0, 0.0],
+                    "z_axis_camera": [0.0, 0.0, 1.0],
+                },
+            )
+
     def test_unknown_model_version_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "未知找点算法版本"):
             predict_target_one(self.semantic_cloud(), version="9.9.9")

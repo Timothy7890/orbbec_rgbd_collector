@@ -645,6 +645,9 @@ def create_pointcloud_app(
                 semantic_cloud,
                 version=version,
                 reference_targets_camera_m=reference_targets,
+                requested_point_slot=int(
+                    options.get("requested_point_slot", 1)
+                ),
                 panel_fit=panel_fit,
                 plane=(
                     submitted_plane

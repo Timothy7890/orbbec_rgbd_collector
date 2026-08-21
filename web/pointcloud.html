@@ -78,6 +78,11 @@
     .target-marker.saved-target {
       background: var(--green); box-shadow: 0 0 0 3px rgba(77,214,154,.28);
     }
+    .target-marker.reference-target {
+      z-index: 3; width: 30px; height: 30px; background: transparent;
+      border-color: var(--green); border-style: dashed;
+      box-shadow: 0 0 0 3px rgba(77,214,154,.16);
+    }
     .point-slot-marker {
       position: absolute; z-index: 4; width: 20px; height: 20px;
       border: 2px solid white; border-radius: 50%;
@@ -248,7 +253,7 @@
           <option value="">正在加载…</option>
         </select>
       </label>
-      <button id="targetFinderBtn" class="secondary" disabled>算法找点1</button>
+      <button id="targetFinderBtn" class="secondary" disabled>算法找点1（Tab）</button>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
@@ -261,7 +266,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。“算法找点1”会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。点击“算法找点1”或按 Tab，会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -292,6 +297,7 @@
       <svg id="planeAxesOverlay" class="coordinate-frame plane-axes-overlay" hidden></svg>
       <div id="calibrationOriginMarker" class="calibration-marker">O</div>
       <div id="calibrationXMarker" class="calibration-marker x-point">X</div>
+      <div id="targetFinderReferenceMarker" class="target-marker reference-target"></div>
       <div id="targetMarker" class="target-marker"></div>
       <div id="pointSlotMarkers"></div>
       <div id="semanticMarkers"></div>
@@ -527,6 +533,7 @@
         gl.drawArrays(gl.POINTS, 0, pointCount);
       }
       updateTargetMarker();
+      updateTargetFinderReferenceMarker();
       updatePointSlotMarkers();
       updateSemanticMarkers();
       updateCoordinateFrame();
@@ -728,7 +735,7 @@
         `算法 ${version} 已找到点1`,
         false,
         validation
-          ? `与该帧已标注点1相差 ${(validation.error_distance_m * 1000).toFixed(1)} mm；可继续微调后按 C 保存`
+          ? `与该帧已标注点1相差 ${(validation.error_distance_m * 1000).toFixed(1)} mm；绿色虚线点为原始点，按 C 后才覆盖`
           : "该帧没有已标注点1可供验证；可微调后按 C 保存"
       );
     }
@@ -1199,6 +1206,7 @@
         const validation = targetFinderPrediction.validation;
         if (validation) {
           const error = validation.prediction_minus_reference_wall_m;
+          lines.push("原始已保存点1: 同时显示，按 C 前不会覆盖");
           lines.push(
             `对已有点1验证误差 mm: dX ${(error[0] * 1000).toFixed(1)}, ` +
             `dY ${(error[1] * 1000).toFixed(1)}, ` +
@@ -1520,11 +1528,36 @@
       }
       marker.style.display = "block";
       marker.classList.toggle("saved-target", targetSaved);
-      marker.dataset.label = selectionArmed
-        ? `点位 ${activePointSlot} · 重新选点已解锁`
-        : (targetSaved
-          ? `点位 ${activePointSlot} · 已保存 · 已锁定`
-          : `点位 ${activePointSlot} · 未保存 · 已锁定`);
+      const finderVersion = selectionSource.startsWith("target-finder/")
+        ? selectionSource.split("/")[1] : null;
+      marker.dataset.label = finderVersion && !targetSaved
+        ? `算法点1 ${finderVersion} · 未保存 · 可微调`
+        : (selectionArmed
+          ? `点位 ${activePointSlot} · 重新选点已解锁`
+          : (targetSaved
+            ? `点位 ${activePointSlot} · 已保存 · 已锁定`
+            : `点位 ${activePointSlot} · 未保存 · 已锁定`));
+      marker.style.left = `${position[0]}px`;
+      marker.style.top = `${position[1]}px`;
+    }
+
+    function updateTargetFinderReferenceMarker() {
+      const marker = $("targetFinderReferenceMarker");
+      const reference =
+        targetFinderPrediction?.validation?.reference_target_camera_m;
+      if (
+        targetSaved ||
+        activePointSlot !== 1 ||
+        !selectionSource.startsWith("target-finder/") ||
+        !Array.isArray(reference)
+      ) {
+        marker.style.display = "none";
+        return;
+      }
+      const position = projectPosition(reference);
+      marker.style.display = position ? "block" : "none";
+      if (!position) return;
+      marker.dataset.label = "原始点1 · 已保存 · 按 C 前保留";
       marker.style.left = `${position[0]}px`;
       marker.style.top = `${position[1]}px`;
     }
@@ -1693,6 +1726,12 @@
           event.preventDefault();
           return;
         }
+      }
+      if (event.code === "Tab") {
+        if (!event.repeat)
+          findPointOne().catch(error => setStatus(error.message, true));
+        event.preventDefault();
+        return;
       }
       const target = event.target;
       if (target instanceof HTMLElement &&

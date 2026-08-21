@@ -146,6 +146,13 @@
     .plane-axes-overlay .plane-boundary-label { font-size: 13px; }
     .plane-axes-overlay .plane-center-label { font-size: 20px; }
     .yolo-panel-overlay { z-index: 4; }
+    .yolo-panel-overlay .panel-plane {
+      fill: rgba(94, 234, 212, .14); stroke: rgba(94, 234, 212, .85);
+      stroke-width: 2; stroke-dasharray: 7 5;
+    }
+    .yolo-panel-overlay .panel-center {
+      fill: #ff6bd6; stroke: rgba(255, 255, 255, .9); stroke-width: 2;
+    }
     .yolo-panel-overlay .panel-edge {
       stroke-width: 7; opacity: .98;
     }
@@ -451,6 +458,7 @@
     let calibrationPoints = [];
     let planeAxisOverlays = [];
     let yoloPanelEdgeOverlays = [];
+    let yoloPanelPlaneOverlay = null;
     let frameLoadToken = 0;
     let analysisRequestToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
@@ -1320,10 +1328,30 @@
       const overlay = $("yoloPanelOverlay");
       overlay.replaceChildren();
       yoloPanelEdgeOverlays = [];
+      yoloPanelPlaneOverlay = null;
       const panel = currentAnalysis?.yolo_panel_fit;
       if (!$("yoloPanelFit").checked || !panel?.available) {
         overlay.hidden = true;
         return;
+      }
+      const corners = panel.rectangle_corners_camera_m;
+      if (Array.isArray(corners) && corners.length === 4) {
+        const polygon = document.createElementNS(
+          "http://www.w3.org/2000/svg", "polygon"
+        );
+        polygon.classList.add("panel-plane");
+        const centerDot = document.createElementNS(
+          "http://www.w3.org/2000/svg", "circle"
+        );
+        centerDot.classList.add("panel-center");
+        centerDot.setAttribute("r", 6);
+        const center = [0, 1, 2].map(
+          axis =>
+            corners.reduce((sum, corner) => sum + corner[axis], 0) / 4
+        );
+        overlay.appendChild(polygon);
+        overlay.appendChild(centerDot);
+        yoloPanelPlaneOverlay = {corners, polygon, center, centerDot};
       }
       for (const edge of panel.edges || []) {
         const role = edge.role === "long" ? "long" : "short";
@@ -1342,12 +1370,14 @@
         overlay.appendChild(label);
         yoloPanelEdgeOverlays.push({edge, line, label});
       }
-      overlay.hidden = yoloPanelEdgeOverlays.length === 0;
+      overlay.hidden =
+        yoloPanelEdgeOverlays.length === 0 && !yoloPanelPlaneOverlay;
     }
 
     function updateYoloPanelOverlay() {
       const overlay = $("yoloPanelOverlay");
-      if (!$("yoloPanelFit").checked || !yoloPanelEdgeOverlays.length) {
+      if (!$("yoloPanelFit").checked ||
+          (!yoloPanelEdgeOverlays.length && !yoloPanelPlaneOverlay)) {
         overlay.hidden = true;
         return;
       }
@@ -1355,6 +1385,28 @@
       overlay.setAttribute(
         "viewBox", `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`
       );
+      if (yoloPanelPlaneOverlay) {
+        const projected = yoloPanelPlaneOverlay.corners.map(
+          corner => projectPosition(corner, false)
+        );
+        const planeVisible = projected.every(Boolean);
+        yoloPanelPlaneOverlay.polygon.style.display =
+          planeVisible ? "" : "none";
+        if (planeVisible)
+          yoloPanelPlaneOverlay.polygon.setAttribute(
+            "points",
+            projected.map(point => `${point[0]},${point[1]}`).join(" ")
+          );
+        const centerScreen = projectPosition(
+          yoloPanelPlaneOverlay.center, false
+        );
+        yoloPanelPlaneOverlay.centerDot.style.display =
+          centerScreen ? "" : "none";
+        if (centerScreen) {
+          yoloPanelPlaneOverlay.centerDot.setAttribute("cx", centerScreen[0]);
+          yoloPanelPlaneOverlay.centerDot.setAttribute("cy", centerScreen[1]);
+        }
+      }
       for (const item of yoloPanelEdgeOverlays) {
         const start = projectPosition(item.edge.start_camera_m, false);
         const end = projectPosition(item.edge.end_camera_m, false);
@@ -1473,6 +1525,7 @@
           lines.push(
             `面板长短边: ${(panel.long_length_m * 1000).toFixed(1)} × ` +
             `${(panel.short_length_m * 1000).toFixed(1)} mm · ` +
+            `主连通域 ${(panel.component_point_count ?? 0).toLocaleString()} 点 · ` +
             `剔除 ${panel.excluded_point_count.toLocaleString()} 点`
           );
         } else if (panel) {

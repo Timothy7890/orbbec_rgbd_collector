@@ -1307,7 +1307,12 @@ def fit_yolo_panel_rectangle(
         & (cells[:, 1] < grid.shape[0])
     )
     grid[cells[valid_cells, 1], cells[valid_cells, 0]] = 1
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    # On tiny panels the raster is only a few dozen cells wide; a fixed
+    # 5x5 close kernel would visibly reshape the outline there.
+    close_size = 3 if int(min(grid.shape)) < 64 else 5
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (close_size, close_size)
+    )
     grid = cv2.morphologyEx(grid, cv2.MORPH_CLOSE, close_kernel)
     component_count, component_labels, stats, _ = (
         cv2.connectedComponentsWithStats(grid, connectivity=8)
@@ -1316,6 +1321,17 @@ def fit_yolo_panel_rectangle(
         raise ValueError("YOLO 面板平面没有稳定连通区域")
     largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     component = (component_labels == largest_label).astype(np.uint8)
+    # Keep only inliers that fall inside the dominant connected component.
+    # Coplanar stragglers from mask bleed would otherwise drag the extent
+    # (and thus the drawn edges) off the panel.
+    in_component = np.zeros(planar.shape[0], dtype=bool)
+    in_component[valid_cells] = (
+        component_labels[cells[valid_cells, 1], cells[valid_cells, 0]]
+        == largest_label
+    )
+    component_planar = planar[in_component]
+    if component_planar.shape[0] < min_points:
+        raise ValueError("面板主连通区域内点不足")
     contours, _ = cv2.findContours(
         component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
     )
@@ -1325,13 +1341,14 @@ def fit_yolo_panel_rectangle(
     boundary = np.zeros_like(component)
     cv2.drawContours(boundary, [contour], -1, 255, 1)
     min_line_pixels = max(8, int(min(grid.shape) * 0.10))
+    max_gap_m = min(0.012, float(np.max(extent)) * 0.05)
     hough = cv2.HoughLinesP(
         boundary,
         rho=1,
         theta=np.pi / 360.0,
         threshold=max(8, min_line_pixels // 2),
         minLineLength=min_line_pixels,
-        maxLineGap=max(4, int(round(0.012 / cell_size))),
+        maxLineGap=max(2, int(round(max_gap_m / cell_size))),
     )
     if hough is None or len(hough) < 2:
         raise ValueError("面板外轮廓没有足够的直线边支持")
@@ -1399,8 +1416,8 @@ def fit_yolo_panel_rectangle(
     )
     if orientation_concentration < 0.35:
         raise ValueError("面板边界方向不稳定")
-    positions_a = planar @ axis_a
-    positions_b = planar @ axis_b
+    positions_a = component_planar @ axis_a
+    positions_b = component_planar @ axis_b
     a_min, a_max = np.quantile(positions_a, [0.01, 0.99])
     b_min, b_max = np.quantile(positions_b, [0.01, 0.99])
     if a_max - a_min >= b_max - b_min:
@@ -1410,14 +1427,22 @@ def fit_yolo_panel_rectangle(
     else:
         long_axis_2d, short_axis_2d = axis_b, -axis_a
         long_min, long_max = float(b_min), float(b_max)
-        short_positions = planar @ short_axis_2d
+        short_positions = component_planar @ short_axis_2d
         short_min, short_max = [
             float(value)
             for value in np.quantile(short_positions, [0.01, 0.99])
         ]
 
     angle_tolerance_cos = direction_tolerance_cos
-    offset_tolerance = max(0.015, threshold_m * 3.0)
+    # Snapping tolerance scales with panel size so that, on a ~5 cm panel,
+    # edges cannot be pulled 15 mm onto a neighbouring structure.
+    offset_tolerance = float(
+        np.clip(
+            0.12 * min(long_max - long_min, short_max - short_min),
+            max(0.004, threshold_m + cell_size),
+            0.015,
+        )
+    )
 
     def supported_offset(
         axis_direction: np.ndarray,
@@ -1490,6 +1515,12 @@ def fit_yolo_panel_rectangle(
     corner = camera_point(selected_long, selected_short)
     long_end = camera_point(opposite_long, selected_short)
     short_end = camera_point(selected_long, opposite_short)
+    rectangle_corners = [
+        camera_point(long_min, short_min),
+        camera_point(long_max, short_min),
+        camera_point(long_max, short_max),
+        camera_point(long_min, short_max),
+    ]
     long_axis_camera = planar_basis @ long_axis_2d
     short_axis_camera = planar_basis @ short_axis_2d
     long_axis_camera /= np.linalg.norm(long_axis_camera)
@@ -1500,6 +1531,7 @@ def fit_yolo_panel_rectangle(
         "available": True,
         "fit_method": "local-ransac-supported-orthogonal-rectangle",
         "point_count": int(points.shape[0]),
+        "component_point_count": int(component_planar.shape[0]),
         "inlier_count": int(inliers.shape[0]),
         "inlier_ratio": float(inliers.shape[0] / points.shape[0]),
         "excluded_point_count": int(points.shape[0] - inliers.shape[0]),
@@ -1510,6 +1542,9 @@ def fit_yolo_panel_rectangle(
         "rms_m": float(np.sqrt(np.mean(residuals**2))),
         "center_camera_m": center.tolist(),
         "normal_camera": normal.tolist(),
+        "rectangle_corners_camera_m": [
+            corner_point.tolist() for corner_point in rectangle_corners
+        ],
         "long_axis_camera": long_axis_camera.tolist(),
         "short_axis_camera": short_axis_camera.tolist(),
         "long_length_m": long_length,

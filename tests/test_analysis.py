@@ -1018,6 +1018,45 @@ class AnalysisTests(unittest.TestCase):
             delta=0.01,
         )
 
+    def test_yolo_panel_ignores_coplanar_stragglers_outside_panel(
+        self,
+    ) -> None:
+        rng = np.random.default_rng(11)
+        count = 14_000
+        panel = np.column_stack(
+            (
+                rng.uniform(-0.027, 0.027, count),
+                rng.uniform(-0.0255, 0.0255, count),
+                0.5 + rng.normal(0.0, 0.0008, count),
+            )
+        )
+        # Coplanar mask-bleed points detached from the panel, up and to the
+        # right. Before the connected-component fix these dragged the
+        # measured edges off the panel.
+        stragglers = np.column_stack(
+            (
+                rng.uniform(0.045, 0.065, 400),
+                rng.uniform(-0.05, -0.035, 400),
+                0.5 + rng.normal(0.0, 0.0008, 400),
+            )
+        )
+
+        fitted = fit_yolo_panel_rectangle(np.vstack((panel, stragglers)))
+
+        self.assertTrue(fitted["available"])
+        self.assertAlmostEqual(fitted["long_length_m"], 0.054, delta=0.006)
+        self.assertAlmostEqual(fitted["short_length_m"], 0.051, delta=0.006)
+        corners = np.asarray(fitted["rectangle_corners_camera_m"])
+        self.assertEqual(corners.shape, (4, 3))
+        self.assertLess(float(np.abs(corners[:, 0]).max()), 0.033)
+        self.assertLess(float(np.abs(corners[:, 1]).max()), 0.032)
+        for edge in fitted["edges"]:
+            endpoints = np.asarray(
+                [edge["start_camera_m"], edge["end_camera_m"]]
+            )
+            self.assertLess(float(np.abs(endpoints[:, 0]).max()), 0.033)
+            self.assertLess(float(np.abs(endpoints[:, 1]).max()), 0.032)
+
     def test_yolo_panel_uses_highest_confidence_polygon(self) -> None:
         x_values, y_values = np.meshgrid(
             np.linspace(-0.12, 0.12, 100),

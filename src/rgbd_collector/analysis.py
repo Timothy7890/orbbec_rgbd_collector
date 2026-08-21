@@ -129,6 +129,7 @@ def analyze_frame(
     plane_threshold_m: float = 0.008,
     min_depth_m: float = 0.15,
     max_depth_m: float = 3.0,
+    use_saved_wall_calibration: bool = True,
 ) -> dict[str, Any]:
     cloud, metadata = reconstruct_frame(
         data_root,
@@ -142,6 +143,10 @@ def analyze_frame(
     plane = fit_dominant_plane(
         cloud["xyz"], threshold_m=plane_threshold_m
     )
+    if use_saved_wall_calibration:
+        calibration = load_wall_calibration(data_root)
+        if calibration is not None:
+            plane = apply_wall_calibration(plane, calibration)
     clusters = semantic_clusters(
         cloud["xyz"], metadata, boxes or [], plane
     )
@@ -262,6 +267,151 @@ def _vector_wall_coordinates(
         "y_m": float(vector_camera_m @ wall_y),
         "z_m": float(vector_camera_m @ wall_z),
     }
+
+
+def build_wall_calibration(
+    plane: dict[str, Any],
+    origin_point_camera_m: list[float],
+    x_point_camera_m: list[float],
+    *,
+    min_separation_m: float = 0.05,
+) -> dict[str, Any]:
+    selected_origin = np.asarray(origin_point_camera_m, dtype=np.float64)
+    selected_x = np.asarray(x_point_camera_m, dtype=np.float64)
+    if (
+        selected_origin.shape != (3,)
+        or selected_x.shape != (3,)
+        or not np.isfinite(selected_origin).all()
+        or not np.isfinite(selected_x).all()
+    ):
+        raise ValueError("坐标系标定点必须是三个有限数值")
+
+    plane_origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
+    _, wall_y, _ = _wall_axes(plane)
+    wall_y = wall_y / np.linalg.norm(wall_y)
+
+    calibrated_origin = selected_origin - (
+        (selected_origin - plane_origin) @ wall_y
+    ) * wall_y
+    projected_x_point = selected_x - (
+        (selected_x - plane_origin) @ wall_y
+    ) * wall_y
+    x_direction = projected_x_point - calibrated_origin
+    separation = float(np.linalg.norm(x_direction))
+    if separation < min_separation_m:
+        raise ValueError(
+            f"两个标定点在墙面上的距离必须至少为 {min_separation_m * 100:.0f} cm"
+        )
+
+    wall_x = x_direction / separation
+    wall_z = np.cross(wall_x, wall_y)
+    z_length = np.linalg.norm(wall_z)
+    if z_length < 1e-6:
+        raise ValueError("两个标定点方向不能与墙面法向平行")
+    wall_z /= z_length
+    wall_x = np.cross(wall_y, wall_z)
+    wall_x /= np.linalg.norm(wall_x)
+
+    return {
+        "schema": "rgbd-wall-coordinate-calibration/v2",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "origin_camera_m": calibrated_origin.tolist(),
+        "x_axis_camera": wall_x.tolist(),
+        "y_axis_camera": wall_y.tolist(),
+        "z_axis_camera": wall_z.tolist(),
+        "normal_camera": wall_y.tolist(),
+        "coordinate_system": "wall-right-handed-x-right-y-inward-z-up",
+        "origin_definition": "first-selected-point-projected-on-wall",
+        "selected_origin_point_camera_m": selected_origin.tolist(),
+        "selected_x_point_camera_m": selected_x.tolist(),
+        "projected_x_point_camera_m": projected_x_point.tolist(),
+        "x_baseline_m": separation,
+    }
+
+
+def _wall_calibration_path(data_root: Path) -> Path:
+    return data_root.expanduser().resolve() / "wall_coordinate_calibration.json"
+
+
+def load_wall_calibration(data_root: Path) -> dict[str, Any] | None:
+    path = _wall_calibration_path(data_root)
+    if not path.exists():
+        return None
+    calibration = json.loads(path.read_text(encoding="utf-8"))
+    if calibration.get("schema") not in {
+        "rgbd-wall-coordinate-calibration/v1",
+        "rgbd-wall-coordinate-calibration/v2",
+    }:
+        raise ValueError("不支持的墙面坐标系标定文件版本")
+    origin = np.asarray(calibration.get("origin_camera_m"), dtype=np.float64)
+    axes = np.asarray(
+        [
+            calibration.get("x_axis_camera"),
+            calibration.get("y_axis_camera"),
+            calibration.get("z_axis_camera"),
+        ],
+        dtype=np.float64,
+    )
+    if (
+        origin.shape != (3,)
+        or axes.shape != (3, 3)
+        or not np.isfinite(origin).all()
+        or not np.isfinite(axes).all()
+    ):
+        raise ValueError("墙面坐标系标定文件包含无效数值")
+    gram = axes @ axes.T
+    if not np.allclose(gram, np.eye(3), atol=1e-4) or float(
+        np.linalg.det(axes)
+    ) < 0.999:
+        raise ValueError("墙面坐标系标定轴不是有效右手正交坐标系")
+    return calibration
+
+
+def save_wall_calibration(
+    data_root: Path, calibration: dict[str, Any]
+) -> Path:
+    root = data_root.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    path = _wall_calibration_path(root)
+    payload = json.dumps(
+        calibration, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".wall-coordinate-", suffix=".json", dir=root
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    return path
+
+
+def apply_wall_calibration(
+    fitted_plane: dict[str, Any], calibration: dict[str, Any]
+) -> dict[str, Any]:
+    calibrated = dict(fitted_plane)
+    for key in (
+        "origin_camera_m",
+        "x_axis_camera",
+        "y_axis_camera",
+        "z_axis_camera",
+        "normal_camera",
+        "coordinate_system",
+        "origin_definition",
+    ):
+        calibrated[key] = calibration[key]
+    calibrated["calibrated"] = True
+    calibrated["calibration_created_at"] = calibration["created_at"]
+    calibrated["calibration_baseline_m"] = calibration.get(
+        "x_baseline_m", calibration.get("z_baseline_m")
+    )
+    calibrated["calibration_source"] = calibration.get("source")
+    return calibrated
 
 
 def _annotation_path(data_root: Path, session_id: str) -> Path:

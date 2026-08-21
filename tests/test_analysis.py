@@ -7,9 +7,13 @@ from pathlib import Path
 import numpy as np
 
 from rgbd_collector.analysis import (
+    apply_wall_calibration,
+    build_wall_calibration,
     fit_dominant_plane,
     load_annotations,
+    load_wall_calibration,
     save_annotation,
+    save_wall_calibration,
     semantic_clusters,
     target_plane_coordinates,
 )
@@ -149,6 +153,61 @@ class AnalysisTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             target_plane_coordinates([0.0, float("nan"), 1.0], plane)
+
+    def test_two_points_calibrate_and_persist_wall_frame(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "center_camera_m": [0.05, 0.04, 1.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+        }
+        calibration = build_wall_calibration(
+            plane,
+            [0.1, 0.2, 0.98],
+            [0.6, 0.2, 1.02],
+        )
+        np.testing.assert_allclose(
+            calibration["origin_camera_m"], [0.1, 0.2, 1.0], atol=1e-9
+        )
+        np.testing.assert_allclose(
+            calibration["x_axis_camera"], [1.0, 0.0, 0.0], atol=1e-9
+        )
+        np.testing.assert_allclose(
+            calibration["y_axis_camera"], [0.0, 0.0, 1.0], atol=1e-9
+        )
+        np.testing.assert_allclose(
+            calibration["z_axis_camera"], [0.0, -1.0, 0.0], atol=1e-9
+        )
+        self.assertAlmostEqual(calibration["x_baseline_m"], 0.5)
+        self.assertEqual(
+            calibration["schema"], "rgbd-wall-coordinate-calibration/v2"
+        )
+
+        applied = apply_wall_calibration(plane, calibration)
+        self.assertTrue(applied["calibrated"])
+        self.assertEqual(applied["center_camera_m"], plane["center_camera_m"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = save_wall_calibration(root, calibration)
+            self.assertEqual(path.name, "wall_coordinate_calibration.json")
+            self.assertEqual(load_wall_calibration(root), calibration)
+
+    def test_wall_calibration_rejects_short_x_baseline(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+        }
+        with self.assertRaisesRegex(ValueError, "至少为 5 cm"):
+            build_wall_calibration(
+                plane,
+                [0.0, 0.0, 1.0],
+                [0.0, -0.02, 1.0],
+            )
 
     def test_semantic_cluster_prefers_points_in_front_of_plane(self) -> None:
         plane = {

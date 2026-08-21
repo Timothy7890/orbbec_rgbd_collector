@@ -6,7 +6,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
-from .analysis import analyze_frame, load_annotations, save_annotation
+from .analysis import (
+    analyze_frame,
+    apply_wall_calibration,
+    build_wall_calibration,
+    load_annotations,
+    load_wall_calibration,
+    save_annotation,
+    save_wall_calibration,
+)
 from .offline_yolo import OfflineYolo
 from .pointcloud import (
     encode_point_cloud,
@@ -101,7 +109,7 @@ def create_pointcloud_app(
     def pointcloud(
         session_id: str,
         frame_id: str,
-        stride: int = Query(default=2, ge=1, le=64),
+        stride: int = Query(default=1, ge=1, le=64),
         min_depth_m: float = Query(default=0.1, ge=0.0, le=99.0),
         max_depth_m: float = Query(default=5.0, gt=0.0, le=100.0),
         max_points: int = Query(default=200_000, ge=1_000, le=1_000_000),
@@ -180,6 +188,65 @@ def create_pointcloud_app(
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "annotations": records}
+
+    @app.get("/api/wall-calibration")
+    def wall_calibration():
+        try:
+            calibration = load_wall_calibration(root)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "calibration": calibration}
+
+    @app.post("/api/wall-calibration/{session_id}/{frame_id}")
+    def calibrate_wall(
+        session_id: str,
+        frame_id: str,
+        body: dict,
+    ):
+        try:
+            analysis = analyze_frame(
+                root,
+                session_id,
+                frame_id,
+                plane_threshold_m=float(
+                    body.get("plane_threshold_m", 0.008)
+                ),
+                min_depth_m=float(body.get("min_depth_m", 0.15)),
+                max_depth_m=float(body.get("max_depth_m", 3.0)),
+                use_saved_wall_calibration=False,
+            )
+            calibration = build_wall_calibration(
+                analysis["plane"],
+                [float(value) for value in body["origin_point_camera_m"]],
+                [float(value) for value in body["x_point_camera_m"]],
+            )
+            calibration["source"] = {
+                "session_id": session_id,
+                "frame_id": frame_id,
+                "plane_inlier_ratio": analysis["plane"]["inlier_ratio"],
+                "plane_rms_m": analysis["plane"]["rms_m"],
+            }
+            path = save_wall_calibration(root, calibration)
+            plane = apply_wall_calibration(analysis["plane"], calibration)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"缺少字段: {exc.args[0]}"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (
+            TypeError,
+            ValueError,
+            RuntimeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "calibration": calibration,
+            "plane": plane,
+            "path": str(path),
+        }
 
     @app.post("/api/annotations/{session_id}/{frame_id}")
     def annotate(

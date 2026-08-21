@@ -103,6 +103,17 @@
       font: 700 14px/1 sans-serif; paint-order: stroke;
       stroke: rgba(0, 0, 0, .9); stroke-width: 3px; stroke-linejoin: round;
     }
+    .calibration-marker {
+      position: absolute; z-index: 5; width: 22px; height: 22px;
+      border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%);
+      color: white; background: #111827; text-align: center;
+      font: 700 12px/18px sans-serif; pointer-events: none; display: none;
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, .22);
+    }
+    .calibration-marker.x-point {
+      border-color: var(--red); color: var(--red);
+      box-shadow: 0 0 0 3px rgba(255, 107, 114, .25);
+    }
     .rgb-picker {
       position: fixed; z-index: 100; inset: 0; padding: 14px;
       display: flex; flex-direction: column;
@@ -170,7 +181,7 @@
       </label>
       <div class="row">
         <label>采样步长
-          <input id="stride" type="number" min="1" max="64" value="3">
+          <input id="stride" type="number" min="1" max="64" value="1">
         </label>
         <label>最大点数
           <input id="maxPoints" type="number" min="1000" max="1000000" value="200000">
@@ -199,7 +210,8 @@
       </label>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
-      <button id="coordinateBtn" class="secondary" disabled>显示坐标系</button>
+      <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
+      <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
@@ -207,7 +219,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧。直接单击点云选点；左键拖动旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。微调前请先分析墙面。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。左键拖动旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -233,6 +245,8 @@
         <text id="axisLabelY" fill="#4dd69a">Y</text>
         <text id="axisLabelZ" fill="#4d8eff">Z</text>
       </svg>
+      <div id="calibrationOriginMarker" class="calibration-marker">O</div>
+      <div id="calibrationXMarker" class="calibration-marker x-point">X</div>
       <div id="targetMarker" class="target-marker"></div>
       <div id="semanticMarkers"></div>
       <div id="rgbPicker" class="rgb-picker" hidden>
@@ -334,8 +348,12 @@
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
     let targetSaved = false;
+    let selectionArmed = true;
     let semanticMarkers = [];
-    let coordinateFrameVisible = false;
+    let coordinateFrameVisible = true;
+    let calibrationMode = false;
+    let calibrationPoints = [];
+    let frameLoadToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
     function savedSelection() {
@@ -394,6 +412,7 @@
       updateTargetMarker();
       updateSemanticMarkers();
       updateCoordinateFrame();
+      updateCalibrationMarkers();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
@@ -449,6 +468,7 @@
     async function loadCloud({preserveView = false} = {}) {
       const session = $("session").value, frame = $("frame").value;
       if (!session || !frame) return setStatus("请先选择会话和帧", true);
+      const loadToken = ++frameLoadToken;
       setStatus("点云重建中…");
       const query = new URLSearchParams({
         stride: $("stride").value,
@@ -458,13 +478,15 @@
         semantic: $("semantic").checked ? "true" : "false",
       });
       const response = await fetch(
-        `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`
+        `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`,
+        {cache: "no-store"}
       );
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || `HTTP ${response.status}`);
       }
       const payload = await response.arrayBuffer();
+      if (loadToken !== frameLoadToken) return;
       const view = new DataView(payload);
       const magic = String.fromCharCode(...new Uint8Array(payload, 0, 4));
       if (magic !== "PCD1") throw new Error("点云二进制格式错误");
@@ -486,12 +508,17 @@
       targetAdjustment = [0, 0, 0];
       targetSaved = false;
       currentAnalysis = null;
-      coordinateFrameVisible = false;
+      selectionArmed = true;
+      calibrationMode = false;
+      calibrationPoints = [];
       syncCoordinateFrameButton();
+      syncCalibrationButton();
       rebuildSemanticMarkers();
-      await loadSavedAnnotation();
+      await loadSavedAnnotation(session, frame, loadToken);
+      if (loadToken !== frameLoadToken) return;
       if (!$("rgbPicker").hidden) await loadRgbImage();
-      if ($("semantic").checked) await analyzeCurrent();
+      if (loadToken !== frameLoadToken) return;
+      await analyzeCurrent({session, frame, loadToken});
     }
 
     function analysisOptions() {
@@ -502,8 +529,9 @@
       };
     }
 
-    async function analyzeCurrent() {
-      const session = $("session").value, frame = $("frame").value;
+    async function analyzeCurrent(options = {}) {
+      const session = options.session || $("session").value;
+      const frame = options.frame || $("frame").value;
       if (!session || !frame) throw new Error("请先选择会话和帧");
       setStatus("正在执行 YOLO 与柜面拟合…");
       const data = await json(
@@ -514,8 +542,13 @@
           body: JSON.stringify(analysisOptions()),
         }
       );
+      if (options.loadToken !== undefined &&
+          (options.loadToken !== frameLoadToken ||
+           session !== $("session").value || frame !== $("frame").value))
+        return;
       currentAnalysis = data.analysis;
       syncCoordinateFrameButton();
+      syncCalibrationButton();
       updateAnalysisPanel();
       rebuildSemanticMarkers();
       renderRgbOverlay();
@@ -547,6 +580,7 @@
         yolo: data.annotation.yolo,
       };
       syncCoordinateFrameButton();
+      syncCalibrationButton();
       rebuildSemanticMarkers();
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
@@ -562,12 +596,18 @@
       setStatus("标注已保存", false, "annotations.jsonl");
     }
 
-    async function loadSavedAnnotation() {
-      const session = $("session").value, frame = $("frame").value;
+    async function loadSavedAnnotation(
+      session = $("session").value,
+      frame = $("frame").value,
+      loadToken = frameLoadToken
+    ) {
       if (!session || !frame) return;
       const data = await json(
         `/api/sessions/${encodeURIComponent(session)}/annotations`
       );
+      if (loadToken !== frameLoadToken ||
+          session !== $("session").value || frame !== $("frame").value)
+        return;
       const saved = (data.annotations || []).find(item => item.frame_id === frame);
       if (saved) {
         selectedTarget = saved.target_camera_m;
@@ -577,6 +617,7 @@
         targetAdjustment =
           saved.target_adjustment_camera_m || [0, 0, 0];
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
+        selectionArmed = false;
         updateAnalysisPanel(
           saved.target_plane_coordinates_m,
           true,
@@ -584,9 +625,11 @@
         );
       } else {
         targetSaved = false;
+        selectionArmed = true;
         updateAnalysisPanel();
       }
       syncCoordinateFrameButton();
+      syncCalibrationButton();
       rebuildSemanticMarkers();
       renderRgbOverlay();
     }
@@ -617,16 +660,50 @@
     function syncCoordinateFrameButton() {
       const available = Boolean(wallAxes(currentAnalysis?.plane));
       $("coordinateBtn").disabled = !available;
-      $("coordinateBtn").textContent =
-        coordinateFrameVisible ? "隐藏坐标系" : "显示坐标系";
+      $("coordinateBtn").textContent = available
+        ? (coordinateFrameVisible ? "隐藏坐标系" : "显示坐标系")
+        : "坐标系待分析";
       if (!available) $("coordinateFrame").hidden = true;
+    }
+
+    function syncCalibrationButton() {
+      const available = Boolean(wallAxes(currentAnalysis?.plane));
+      $("calibrateBtn").disabled = !available;
+      $("calibrateBtn").textContent = calibrationMode
+        ? "取消坐标系校准（X）"
+        : "校准并保存坐标系（X）";
+      $("calibrateBtn").classList.toggle("pick-active", calibrationMode);
+    }
+
+    function toggleCalibrationMode() {
+      if (calibrationMode) {
+        calibrationMode = false;
+        calibrationPoints = [];
+        syncCalibrationButton();
+        setStatus("已取消坐标系校准");
+        return;
+      }
+      if (!wallAxes(currentAnalysis?.plane)) {
+        setStatus("请等待墙面自动分析完成", true);
+        return;
+      }
+      calibrationMode = true;
+      calibrationPoints = [];
+      syncCalibrationButton();
+      setStatus(
+        "坐标系校准：请选择原点 O",
+        false,
+        "随后再选择位于原点右侧的点来定义 +X"
+      );
     }
 
     function updateCoordinateFrame() {
       const overlay = $("coordinateFrame");
       const plane = currentAnalysis?.plane;
       const axes = wallAxes(plane);
-      const origin = plane?.center_camera_m || plane?.origin_camera_m;
+      const origin = plane?.calibrated
+        ? plane.origin_camera_m
+        : (plane?.center_camera_m || plane?.origin_camera_m);
       if (!coordinateFrameVisible || !axes || !Array.isArray(origin)) {
         overlay.hidden = true;
         return;
@@ -666,6 +743,21 @@
       });
     }
 
+    function updateCalibrationMarkers() {
+      const markers = [
+        $("calibrationOriginMarker"),
+        $("calibrationXMarker"),
+      ];
+      markers.forEach((marker, index) => {
+        const point = calibrationPoints[index];
+        const position = point ? projectPosition(point) : null;
+        marker.style.display = position ? "block" : "none";
+        if (!position) return;
+        marker.style.left = `${position[0]}px`;
+        marker.style.top = `${position[1]}px`;
+      });
+    }
+
     function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
       $("saveBtn").disabled = !selectedTarget;
       const lines = [];
@@ -680,6 +772,10 @@
       if (currentAnalysis?.plane) {
         const p = currentAnalysis.plane;
         const axes = wallAxes(p);
+        if (p.calibrated)
+          lines.push(`坐标系: 已保存标定（基线 ${(p.calibration_baseline_m * 100).toFixed(1)} cm）`);
+        else
+          lines.push("坐标系: 当前帧自动估计");
         lines.push(`墙面 +Y 法向（相机系）: ${axes[1].map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`墙面 +Z 向上（相机系）: ${axes[2].map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
@@ -769,7 +865,57 @@
       }
     }
 
+    async function captureCalibrationPoint(point) {
+      calibrationPoints.push([...point]);
+      if (calibrationPoints.length === 1) {
+        setStatus(
+          "已选择坐标原点 O",
+          false,
+          "请点击位于原点右侧的第二个点来定义 +X，距离建议 30–50 cm"
+        );
+        return;
+      }
+
+      const session = $("session").value, frame = $("frame").value;
+      setStatus("正在计算并保存标定坐标系…");
+      try {
+        const data = await json(
+          `/api/wall-calibration/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+          {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              ...analysisOptions(),
+              origin_point_camera_m: calibrationPoints[0],
+              x_point_camera_m: calibrationPoints[1],
+            }),
+          }
+        );
+        if (session !== $("session").value || frame !== $("frame").value) return;
+        currentAnalysis.plane = data.plane;
+        calibrationMode = false;
+        calibrationPoints = [];
+        syncCoordinateFrameButton();
+        syncCalibrationButton();
+        updateAnalysisPanel();
+        setStatus(
+          "墙面坐标系已标定并保存",
+          false,
+          `X 轴基线 ${(data.calibration.x_baseline_m * 100).toFixed(1)} cm`
+        );
+      } catch (error) {
+        calibrationPoints = [];
+        setStatus(
+          error.message,
+          true,
+          "请重新点击坐标原点 O，再点击其右侧的 +X 点"
+        );
+      }
+    }
+
     async function selectRgbPixel(event) {
+      if (!calibrationMode && selectedTarget && !selectionArmed)
+        throw new Error("选点已锁定，请按 R 解锁下一次选点");
       const image = $("rgbImage");
       const rect = image.getBoundingClientRect();
       const u = Math.max(0, Math.min(
@@ -794,11 +940,18 @@
           }),
         }
       );
+      if (calibrationMode) {
+        $("rgbFoot").textContent =
+          `标定点深度 ${(data.depth_m * 1000).toFixed(1)} mm`;
+        await captureCalibrationPoint(data.point_camera_m);
+        return;
+      }
       selectedTarget = data.point_camera_m;
       selectedPixel = data.used_pixel;
       selectionSource = "rgb";
       targetSaved = false;
       targetAdjustment = [0, 0, 0];
+      selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
       const shifted = data.search_distance_px > 0
@@ -834,6 +987,8 @@
 
     function pickTargetAt(clientX, clientY) {
       if (!cloudView || !pointCount) throw new Error("请先加载点云");
+      if (!calibrationMode && selectedTarget && !selectionArmed)
+        throw new Error("选点已锁定，请按 R 解锁下一次选点");
       const rect = canvas.getBoundingClientRect();
       const clickX = clientX - rect.left, clickY = clientY - rect.top;
       let best = null, bestDistance2 = 14 * 14, bestDepth = Infinity;
@@ -855,11 +1010,16 @@
         }
       }
       if (!best) throw new Error("点击位置附近没有点，请增大点大小或调整视角");
+      if (calibrationMode) {
+        captureCalibrationPoint(best);
+        return;
+      }
       selectedTarget = best;
       selectedPixel = null;
       selectionSource = "pointcloud";
       targetSaved = false;
       targetAdjustment = [0, 0, 0];
+      selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
       setStatus("已点选三维目标", false, best.map(v => v.toFixed(4)).join(", ") + " m");
@@ -878,7 +1038,9 @@
       }
       marker.style.display = "block";
       marker.classList.toggle("saved-target", targetSaved);
-      marker.dataset.label = targetSaved ? "已保存点" : "当前点";
+      marker.dataset.label = selectionArmed
+        ? "重新选点已解锁"
+        : (targetSaved ? "已保存点 · 已锁定" : "当前点 · 已锁定");
       marker.style.left = `${position[0]}px`;
       marker.style.top = `${position[1]}px`;
     }
@@ -981,6 +1143,7 @@
       coordinateFrameVisible = !coordinateFrameVisible;
       syncCoordinateFrameButton();
     };
+    $("calibrateBtn").onclick = toggleCalibrationMode;
     $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
     $("closeRgbBtn").onclick = () => {
       $("rgbPicker").hidden = true;
@@ -995,14 +1158,45 @@
     $("resetBtn").onclick = resetView;
     document.addEventListener("keydown", event => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.code === "Escape" && !$("rgbPicker").hidden) {
-        $("rgbPicker").hidden = true;
-        event.preventDefault();
-        return;
+      if (event.code === "Escape") {
+        const pickerWasOpen = !$("rgbPicker").hidden;
+        const calibrationWasActive = calibrationMode;
+        if (pickerWasOpen) $("rgbPicker").hidden = true;
+        if (calibrationMode) {
+          calibrationMode = false;
+          calibrationPoints = [];
+          syncCalibrationButton();
+          setStatus("已取消坐标系校准");
+        }
+        if (selectionArmed && selectedTarget) {
+          selectionArmed = false;
+          setStatus("已取消重新选点", false, "当前目标仍保持锁定");
+        }
+        if (pickerWasOpen || selectedTarget || calibrationWasActive) {
+          event.preventDefault();
+          return;
+        }
       }
       const target = event.target;
       if (target instanceof HTMLElement &&
           (target.matches("input, textarea") || target.isContentEditable)) return;
+      if (event.code === "KeyR") {
+        if (!event.repeat) {
+          selectionArmed = true;
+          setStatus(
+            selectedTarget ? "已解锁下一次选点" : "可以进行第一次选点",
+            false,
+            selectedTarget ? "选择新点后将自动锁定；Esc 可取消" : ""
+          );
+        }
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "KeyX") {
+        if (!event.repeat) toggleCalibrationMode();
+        event.preventDefault();
+        return;
+      }
       if (nudgeTarget(event.code)) {
         event.preventDefault();
         return;

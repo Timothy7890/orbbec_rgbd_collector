@@ -32,6 +32,7 @@ from .pointcloud import (
     resolve_frame_paths,
     session_summaries,
 )
+from .target_finder import predict_target_one, target_finder_models
 
 
 def create_pointcloud_app(
@@ -56,6 +57,15 @@ def create_pointcloud_app(
             "data_root": str(root),
             "sessions": len(session_summaries(root)),
             "yolo": detector.status(),
+        }
+
+    @app.get("/api/target-finder/models")
+    def target_finder_model_list():
+        models = target_finder_models()
+        return {
+            "ok": True,
+            "models": models,
+            "default_version": models[-1]["version"],
         }
 
     @app.get("/api/sessions")
@@ -236,6 +246,85 @@ def create_pointcloud_app(
         except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "analysis": result}
+
+    @app.post("/api/target-finder/{session_id}/{frame_id}")
+    def find_target_one(
+        session_id: str,
+        frame_id: str,
+        body: dict | None = None,
+    ):
+        options = body or {}
+        version = str(options.get("version", "0.1.0"))
+        try:
+            cache_key = (session_id, frame_id)
+            cached = analysis_cache.get(cache_key)
+            submitted_plane = options.get("plane")
+            if cached is not None:
+                analysis_cache.move_to_end(cache_key)
+                semantic_cloud = cached["semantic_cloud"]
+            else:
+                boxes = (
+                    detector.infer_frame(root, session_id, frame_id)
+                    if detector.enabled
+                    else None
+                )
+                analysis = analyze_frame(
+                    root,
+                    session_id,
+                    frame_id,
+                    boxes=boxes,
+                    plane_threshold_m=float(
+                        options.get("plane_threshold_m", 0.008)
+                    ),
+                    min_depth_m=float(options.get("min_depth_m", 0.15)),
+                    max_depth_m=float(options.get("max_depth_m", 3.0)),
+                    stride=int(options.get("stride", 3)),
+                    max_points=int(options.get("max_points", 1_000_000)),
+                    min_plane_points=int(
+                        options.get("min_plane_points", 300)
+                    ),
+                    include_highest_confidence_semantic_cloud=True,
+                )
+                semantic_cloud = analysis.pop(
+                    "_highest_confidence_semantic_cloud", None
+                )
+                analysis_cache[cache_key] = {
+                    "semantic_cloud": semantic_cloud,
+                    "yolo": copy.deepcopy(analysis["yolo"]),
+                }
+                analysis_cache.move_to_end(cache_key)
+                while len(analysis_cache) > 32:
+                    analysis_cache.popitem(last=False)
+                if not isinstance(submitted_plane, dict):
+                    submitted_plane = analysis["plane"]
+            if semantic_cloud is None:
+                raise ValueError("当前帧没有可用于找点的 YOLO 语义点云")
+            if isinstance(submitted_plane, dict):
+                semantic_cloud = reproject_semantic_pointcloud(
+                    semantic_cloud, submitted_plane
+                )
+
+            reference_target = None
+            for annotation in load_annotations(root, session_id):
+                if annotation.get("frame_id") != frame_id:
+                    continue
+                points = annotation.get("points")
+                point_one = points.get("1") if isinstance(points, dict) else None
+                if isinstance(point_one, dict):
+                    reference_target = point_one.get("target_camera_m")
+                elif annotation.get("target_camera_m") is not None:
+                    reference_target = annotation["target_camera_m"]
+                break
+            prediction = predict_target_one(
+                semantic_cloud,
+                version=version,
+                reference_target_camera_m=reference_target,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "prediction": prediction}
 
     @app.get("/api/sessions/{session_id}/annotations")
     def annotations(session_id: str):
@@ -423,6 +512,7 @@ def create_pointcloud_app(
                     "target_adjustment_camera_m"
                 ),
                 point_slot=point_slot,
+                target_finder=body.get("target_finder"),
             )
         except KeyError as exc:
             raise HTTPException(

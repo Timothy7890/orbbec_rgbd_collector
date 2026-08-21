@@ -1898,6 +1898,7 @@ def save_annotation(
     selection_source: str = "pointcloud",
     target_adjustment_camera_m: list[float] | None = None,
     point_slot: int = 1,
+    target_finder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _, frame_dir = resolve_frame_paths(data_root, session_id, frame_id)
     if not frame_dir.is_dir():
@@ -1907,8 +1908,13 @@ def save_annotation(
         raise ValueError("目标点必须是三个有限数值")
     if target[2] <= 0:
         raise ValueError("目标点深度必须大于零")
-    if selection_source not in {"pointcloud", "rgb"}:
-        raise ValueError("selection_source 必须是 pointcloud 或 rgb")
+    if (
+        selection_source not in {"pointcloud", "rgb"}
+        and not selection_source.startswith("target-finder/")
+    ):
+        raise ValueError(
+            "selection_source 必须是 pointcloud、rgb 或 target-finder/<版本>"
+        )
     if not 1 <= point_slot <= 9:
         raise ValueError("point_slot 必须在 1~9")
     adjustment = np.asarray(
@@ -1934,6 +1940,10 @@ def save_annotation(
             "u": int(target_pixel["u"]),
             "v": int(target_pixel["v"]),
         }
+    if target_finder is not None:
+        if not isinstance(target_finder, dict):
+            raise ValueError("target_finder 必须是对象")
+        point_record["target_finder"] = target_finder
     yolo_record = yolo or {"available": False, "boxes": []}
     clusters = yolo_record.get("clusters", [])
     if clusters:

@@ -243,6 +243,12 @@
       <label>墙面坐标微调步长（mm）
         <input id="nudgeStep" type="number" min="0.1" max="100" step="0.1" value="1">
       </label>
+      <label>点1找点算法版本
+        <select id="targetFinderVersion">
+          <option value="">正在加载…</option>
+        </select>
+      </label>
+      <button id="targetFinderBtn" class="secondary" disabled>算法找点1</button>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
@@ -255,7 +261,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。“算法找点1”会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -390,6 +396,7 @@
     let targetSaved = false;
     let targetPlaneCoordinates = null;
     let targetSemanticCoordinates = null;
+    let targetFinderPrediction = null;
     let activePointSlot = 1;
     let pointSlotStates = {};
     let allPointSlotsVisible = false;
@@ -428,6 +435,7 @@
         saved: targetSaved,
         planeCoordinates: targetPlaneCoordinates,
         semanticCoordinates: targetSemanticCoordinates,
+        targetFinder: targetFinderPrediction,
       };
     }
 
@@ -443,6 +451,7 @@
       targetSaved = Boolean(state?.saved);
       targetPlaneCoordinates = state?.planeCoordinates || null;
       targetSemanticCoordinates = state?.semanticCoordinates || null;
+      targetFinderPrediction = state?.targetFinder || null;
       selectionArmed = !selectedTarget;
       if (selectedTarget) focusOrbitOn(selectedTarget);
       updateAnalysisPanel();
@@ -625,6 +634,7 @@
       targetSaved = false;
       targetPlaneCoordinates = null;
       targetSemanticCoordinates = null;
+      targetFinderPrediction = null;
       activePointSlot = 1;
       pointSlotStates = {};
       currentAnalysis = null;
@@ -652,6 +662,75 @@
         min_plane_points: Number($("minPlanePoints").value),
         include_plane_debug: $("planes").checked,
       };
+    }
+
+    async function loadTargetFinderModels() {
+      const data = await json("/api/target-finder/models");
+      const select = $("targetFinderVersion");
+      select.replaceChildren();
+      for (const model of data.models || []) {
+        const option = document.createElement("option");
+        option.value = model.version;
+        option.textContent =
+          `${model.version} · ${model.name}（${model.training_frame_count}帧）`;
+        select.appendChild(option);
+      }
+      select.value = data.default_version || select.options[0]?.value || "";
+      $("targetFinderBtn").disabled = !select.value;
+    }
+
+    async function findPointOne() {
+      const session = $("session").value, frame = $("frame").value;
+      const version = $("targetFinderVersion").value;
+      if (!session || !frame) throw new Error("请先选择会话和帧");
+      if (!version) throw new Error("没有可用的找点算法版本");
+      if (!wallAxes(currentAnalysis?.plane))
+        throw new Error("请先等待当前帧坐标系与 YOLO 分析完成");
+      setStatus(`正在使用算法 ${version} 查找点1…`);
+      const data = await json(
+        `/api/target-finder/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            ...analysisOptions(),
+            version,
+            plane: currentAnalysis.plane,
+          }),
+        }
+      );
+      if (session !== $("session").value || frame !== $("frame").value) return;
+      const prediction = data.prediction;
+      activatePointSlot(1, false);
+      selectedTarget = [...prediction.target_camera_m];
+      selectedPixel = null;
+      selectionSource = prediction.selection_source;
+      targetAdjustment = [0, 0, 0];
+      targetSaved = false;
+      selectionArmed = false;
+      targetPlaneCoordinates = {
+        x_m: prediction.target_wall_m[0],
+        y_m: prediction.target_wall_m[1],
+        z_m: prediction.target_wall_m[2],
+      };
+      targetSemanticCoordinates = {
+        x_m: prediction.model.offset_wall_m[0],
+        y_m: prediction.model.offset_wall_m[1],
+        z_m: prediction.model.offset_wall_m[2],
+      };
+      targetFinderPrediction = prediction;
+      focusOrbitOn(selectedTarget);
+      rememberActivePointState();
+      updateAnalysisPanel();
+      renderRgbOverlay();
+      const validation = prediction.validation;
+      setStatus(
+        `算法 ${version} 已找到点1`,
+        false,
+        validation
+          ? `与该帧已标注点1相差 ${(validation.error_distance_m * 1000).toFixed(1)} mm；可继续微调后按 C 保存`
+          : "该帧没有已标注点1可供验证；可微调后按 C 保存"
+      );
     }
 
     async function analyzeCurrent(options = {}) {
@@ -735,6 +814,7 @@
             target_adjustment_camera_m: targetAdjustment,
             point_slot: activePointSlot,
             plane: currentAnalysis?.plane,
+            target_finder: targetFinderPrediction,
           }),
         }
       );
@@ -758,6 +838,7 @@
       targetPlaneCoordinates = data.annotation.target_plane_coordinates_m;
       targetSemanticCoordinates =
         data.annotation.target_relative_to_semantic_m || null;
+      targetFinderPrediction = data.annotation.target_finder || null;
       rememberActivePointState();
       updateAnalysisPanel();
       const savedCloud = data.annotation.yolo?.saved_pointcloud;
@@ -798,6 +879,7 @@
             planeCoordinates: point.target_plane_coordinates_m || null,
             semanticCoordinates:
               point.target_relative_to_semantic_m || null,
+            targetFinder: point.target_finder || null,
           };
         }
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
@@ -813,6 +895,7 @@
         targetSaved = false;
         targetPlaneCoordinates = null;
         targetSemanticCoordinates = null;
+        targetFinderPrediction = null;
         selectionArmed = true;
         updateAnalysisPanel();
       }
@@ -1102,7 +1185,27 @@
       ];
       if (selectedTarget) {
         lines.push(`目标相机系 m: ${selectedTarget.map(v => v.toFixed(4)).join(", ")}`);
-        lines.push(`选点来源: ${selectionSource === "rgb" ? "RGB 像素" : "三维点云"}`);
+        const sourceLabel = selectionSource.startsWith("target-finder/")
+          ? `算法 ${selectionSource.split("/")[1]}`
+          : (selectionSource === "rgb" ? "RGB 像素" : "三维点云");
+        lines.push(`选点来源: ${sourceLabel}`);
+      }
+      if (targetFinderPrediction) {
+        lines.push(
+          `找点模型: ${targetFinderPrediction.model.version} · ` +
+          `${targetFinderPrediction.model.training_frame_count}帧实验版 · ` +
+          `YOLO ${targetFinderPrediction.semantic_point_count.toLocaleString()} 点`
+        );
+        const validation = targetFinderPrediction.validation;
+        if (validation) {
+          const error = validation.prediction_minus_reference_wall_m;
+          lines.push(
+            `对已有点1验证误差 mm: dX ${(error[0] * 1000).toFixed(1)}, ` +
+            `dY ${(error[1] * 1000).toFixed(1)}, ` +
+            `dZ ${(error[2] * 1000).toFixed(1)}, ` +
+            `距离 ${(validation.error_distance_m * 1000).toFixed(1)}`
+          );
+        }
       }
       if (selectedPixel)
         lines.push(`RGB 像素: (${selectedPixel.u}, ${selectedPixel.v})`);
@@ -1324,6 +1427,7 @@
       targetAdjustment = [0, 0, 0];
       targetPlaneCoordinates = null;
       targetSemanticCoordinates = null;
+      targetFinderPrediction = null;
       selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -1396,6 +1500,7 @@
       targetAdjustment = [0, 0, 0];
       targetPlaneCoordinates = null;
       targetSemanticCoordinates = null;
+      targetFinderPrediction = null;
       selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -1543,6 +1648,8 @@
       loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
     };
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
+    $("targetFinderBtn").onclick = () =>
+      findPointOne().catch(e => setStatus(e.message, true));
     $("coordinateBtn").onclick = () => {
       if (!wallAxes(currentAnalysis?.plane)) {
         setStatus("请先分析墙面", true);
@@ -1710,6 +1817,7 @@
       if (!$("rgbPicker").hidden) renderRgbOverlay();
     };
 
+    loadTargetFinderModels().catch(error => setStatus(error.message, true));
     refreshSessions(true)
       .then(() => $("frame").value && loadCloud())
       .catch(error => setStatus(error.message, true));

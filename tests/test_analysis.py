@@ -676,6 +676,24 @@ class AnalysisTests(unittest.TestCase):
                 [0.3, 0.2, 0.95],
             )
             self.assertIn("2", records[0]["points"])
+            saved = save_annotation(
+                root,
+                session.session_id,
+                frame_id,
+                target_camera_m=[0.4, 0.2, 0.95],
+                plane=plane,
+                point_slot=3,
+                selection_source="target-finder/0.1.0",
+                target_finder={"model": {"version": "0.1.0"}},
+            )
+            self.assertEqual(
+                saved["points"]["3"]["selection_source"],
+                "target-finder/0.1.0",
+            )
+            self.assertEqual(
+                saved["points"]["3"]["target_finder"]["model"]["version"],
+                "0.1.0",
+            )
 
     def test_target_plane_coordinates_validates_target(self) -> None:
         plane = {

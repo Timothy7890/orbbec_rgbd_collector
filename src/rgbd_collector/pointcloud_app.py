@@ -224,6 +224,9 @@ def create_pointcloud_app(
                 max_depth_m=float(options.get("max_depth_m", 3.0)),
                 stride=int(options.get("stride", 3)),
                 max_points=int(options.get("max_points", 1_000_000)),
+                plane_analysis_max_points=int(
+                    options.get("plane_analysis_max_points", 200_000)
+                ),
                 min_plane_points=int(options.get("min_plane_points", 300)),
                 include_plane_debug=bool(
                     options.get("include_plane_debug", False)
@@ -280,6 +283,9 @@ def create_pointcloud_app(
                     max_depth_m=float(options.get("max_depth_m", 3.0)),
                     stride=int(options.get("stride", 3)),
                     max_points=int(options.get("max_points", 1_000_000)),
+                    plane_analysis_max_points=int(
+                        options.get("plane_analysis_max_points", 200_000)
+                    ),
                     min_plane_points=int(
                         options.get("min_plane_points", 300)
                     ),
@@ -364,6 +370,9 @@ def create_pointcloud_app(
                 max_depth_m=float(body.get("max_depth_m", 3.0)),
                 stride=int(body.get("stride", 3)),
                 max_points=int(body.get("max_points", 1_000_000)),
+                plane_analysis_max_points=int(
+                    body.get("plane_analysis_max_points", 200_000)
+                ),
                 min_plane_points=int(body.get("min_plane_points", 300)),
                 use_saved_wall_calibration=False,
             )
@@ -476,6 +485,9 @@ def create_pointcloud_app(
                     max_depth_m=float(body.get("max_depth_m", 3.0)),
                     stride=int(body.get("stride", 3)),
                     max_points=int(body.get("max_points", 1_000_000)),
+                    plane_analysis_max_points=int(
+                        body.get("plane_analysis_max_points", 200_000)
+                    ),
                     min_plane_points=int(
                         body.get("min_plane_points", 300)
                     ),

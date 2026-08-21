@@ -218,6 +218,9 @@
           <input id="maxPoints" type="number" min="1000" max="1000000" value="1000000">
         </label>
       </div>
+      <label>找 X / 柜面分析最大点数
+        <input id="planeAnalysisMaxPoints" type="number" min="1000" max="1000000" step="10000" value="200000">
+      </label>
       <div class="row">
         <label>最近距离（m）
           <input id="minDepth" type="number" min="0" max="99" step="0.05" value="0.1">
@@ -666,6 +669,7 @@
         max_depth_m: Number($("maxDepth").value),
         stride: Number($("stride").value),
         max_points: Number($("maxPoints").value),
+        plane_analysis_max_points: Number($("planeAnalysisMaxPoints").value),
         min_plane_points: Number($("minPlanePoints").value),
         include_plane_debug: $("planes").checked,
       };
@@ -1251,7 +1255,11 @@
         if (p.plane_analysis_skipped)
           lines.push("柜面分析: 已跳过（使用保存坐标系）");
         else
-          lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
+          lines.push(
+            `内点: ${(p.inlier_ratio * 100).toFixed(1)}%  ` +
+            `RMS: ${(p.rms_m * 1000).toFixed(2)} mm · ` +
+            `找X分析点: ${(p.plane_analysis_point_count || p.sample_count).toLocaleString()}`
+          );
       }
       if (currentAnalysis?.yolo) {
         const instances = currentAnalysis.yolo.boxes;

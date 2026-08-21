@@ -1079,6 +1079,7 @@ def analyze_frame(
     max_depth_m: float = 3.0,
     stride: int = 3,
     max_points: int = 1_000_000,
+    plane_analysis_max_points: int = 200_000,
     min_plane_points: int = 300,
     use_saved_wall_calibration: bool = True,
     include_plane_debug: bool = False,
@@ -1086,6 +1087,8 @@ def analyze_frame(
 ) -> dict[str, Any]:
     if min_plane_points < 3:
         raise ValueError("最少平面点数不能小于 3")
+    if not 1_000 <= plane_analysis_max_points <= 1_000_000:
+        raise ValueError("X 轴分析最大点数必须在 1000~1000000")
     calibration = (
         load_wall_calibration(data_root, session_id, frame_id)
         if use_saved_wall_calibration
@@ -1104,27 +1107,42 @@ def analyze_frame(
     )
     if run_plane_analysis:
         pixel_coordinates = metadata.pop("_pixel_coordinates")
+        plane_xyz = cloud["xyz"]
+        plane_pixels = pixel_coordinates
+        if plane_xyz.shape[0] > plane_analysis_max_points:
+            analysis_indices = np.linspace(
+                0,
+                plane_xyz.shape[0] - 1,
+                plane_analysis_max_points,
+                dtype=np.int64,
+            )
+            plane_xyz = plane_xyz[analysis_indices]
+            plane_pixels = plane_pixels[analysis_indices]
+        plane_sampling_ratio = plane_xyz.shape[0] / max(cloud.shape[0], 1)
+        analysis_min_plane_points = max(
+            3, int(np.ceil(min_plane_points * plane_sampling_ratio))
+        )
         plane = fit_dominant_plane(
-            cloud["xyz"], threshold_m=plane_threshold_m
+            plane_xyz, threshold_m=plane_threshold_m
         )
         plane_labels, segmented_planes = segment_dominant_planes(
-            cloud["xyz"], threshold_m=plane_threshold_m
+            plane_xyz, threshold_m=plane_threshold_m
         )
         plane_labels, segmented_planes = split_plane_labels_by_connectivity(
-            cloud["xyz"],
+            plane_xyz,
             plane_labels,
             segmented_planes,
-            pixel_coordinates,
+            plane_pixels,
             metadata["image_shape"],
             stride=stride,
             source_point_count=int(metadata["source_point_count"]),
-            min_component_count=min_plane_points,
+            min_component_count=analysis_min_plane_points,
             min_component_ratio=0.0,
             preserve_farthest_plane=True,
             max_planar_point_distance_from_farthest_plane_m=0.010,
         )
         plane_segments = describe_p0_boundary_lines(
-            cloud["xyz"], plane_labels, segmented_planes
+            plane_xyz, plane_labels, segmented_planes
         )
         if calibration is not None:
             plane = apply_wall_calibration(plane, calibration)
@@ -1134,13 +1152,18 @@ def analyze_frame(
             )
             if plane["axis_estimation"] == "camera-up-projection":
                 plane = estimate_wall_x_from_secondary_plane_shape(
-                    plane, cloud["xyz"], plane_labels, segmented_planes
+                    plane, plane_xyz, plane_labels, segmented_planes
                 )
                 if plane["axis_estimation"] == "camera-up-projection":
                     plane = estimate_wall_x_from_plane_intersections(
                         plane, segmented_planes
                     )
             plane["automatic_segmented_plane_count"] = len(segmented_planes)
+        plane["plane_analysis_point_count"] = int(plane_xyz.shape[0])
+        plane["plane_analysis_source_point_count"] = int(cloud.shape[0])
+        plane["plane_analysis_downsampled"] = bool(
+            plane_xyz.shape[0] < cloud.shape[0]
+        )
         plane["plane_analysis_skipped"] = False
     else:
         assert calibration is not None

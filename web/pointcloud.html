@@ -684,7 +684,14 @@
         true,
         data.annotation.target_relative_to_semantic_m
       );
-      setStatus("标注已保存", false, "annotations.jsonl");
+      const savedCloud = data.annotation.yolo?.saved_pointcloud;
+      setStatus(
+        "标注已保存",
+        false,
+        savedCloud
+          ? `最高置信度 YOLO 点云 ${savedCloud.point_count.toLocaleString()} 点`
+          : "当前帧没有可保存的 YOLO 语义点云"
+      );
     }
 
     async function loadSavedAnnotation(
@@ -1042,6 +1049,13 @@
         const instances = currentAnalysis.yolo.boxes;
         const masks = instances.filter(item => item.polygon?.length >= 3).length;
         lines.push(`YOLO 实例: ${instances.length}（Mask ${masks}）`);
+        const savedCloud = currentAnalysis.yolo.saved_pointcloud;
+        if (savedCloud)
+          lines.push(
+            `已保存 YOLO 点云: ${savedCloud.detection.name} ` +
+            `${(savedCloud.detection.conf * 100).toFixed(1)}% · ` +
+            `${savedCloud.point_count.toLocaleString()} 点`
+          );
       }
       local = wallCoordinates(local);
       semanticLocal = wallCoordinates(semanticLocal);

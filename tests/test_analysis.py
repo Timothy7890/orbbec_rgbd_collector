@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,9 +18,11 @@ from rgbd_collector.analysis import (
     estimate_wall_x_from_plane_intersections,
     estimate_wall_x_from_secondary_plane_shape,
     fit_dominant_plane,
+    highest_confidence_semantic_pointcloud,
     load_annotations,
     load_wall_calibration,
     save_annotation,
+    save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
     segment_dominant_planes,
     semantic_clusters,
@@ -879,6 +882,80 @@ class AnalysisTests(unittest.TestCase):
         )
         self.assertEqual(clusters[0]["point_count"], 3)
         self.assertLess(clusters[0]["centroid_camera_m"][0], 0.04)
+
+    def test_only_highest_confidence_yolo_pointcloud_is_saved(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+        }
+        pixels = np.array(
+            [[102, 102], [103, 102], [102, 103], [116, 116], [117, 116], [116, 117]],
+            dtype=np.float64,
+        )
+        z = np.full(pixels.shape[0], 0.95)
+        points = np.column_stack(
+            (
+                (pixels[:, 0] - 100) * z / 100,
+                (pixels[:, 1] - 100) * z / 100,
+                z,
+            )
+        )
+        boxes = [
+            {
+                "cls": 2,
+                "name": "lower",
+                "conf": 0.4,
+                "xyxy": [114, 114, 120, 120],
+            },
+            {
+                "cls": 1,
+                "name": "highest",
+                "conf": 0.95,
+                "xyxy": [100, 100, 106, 106],
+            },
+        ]
+        semantic_cloud = highest_confidence_semantic_pointcloud(
+            points,
+            np.tile(np.array([[10, 20, 30, 255]], dtype=np.uint8), (6, 1)),
+            {
+                "intrinsics": {"fx": 100, "fy": 100, "cx": 100, "cy": 100},
+                "image_shape": [200, 200],
+            },
+            boxes,
+            plane,
+        )
+        self.assertIsNotNone(semantic_cloud)
+        assert semantic_cloud is not None
+        self.assertEqual(semantic_cloud["detection"]["name"], "highest")
+        self.assertEqual(semantic_cloud["xyz_camera_m"].shape, (3, 3))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "yolo cloud", camera_metadata())
+            frame_id = session.enqueue(make_frame(1), "manual")
+            session.close()
+            summary = save_highest_confidence_semantic_pointcloud(
+                root,
+                session.session_id,
+                frame_id,
+                semantic_cloud,
+                target_camera_m=[0.1, 0.2, 1.0],
+            )
+            data_path = root / summary["data_file"]
+            metadata_path = data_path.with_suffix(".json")
+            with np.load(data_path) as saved:
+                self.assertEqual(saved["xyz_camera_m"].shape, (3, 3))
+                self.assertEqual(saved["xyz_wall_m"].shape, (3, 3))
+                self.assertEqual(saved["rgb"].dtype, np.uint8)
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["selection"], "highest-confidence-only")
+        self.assertEqual(metadata["detection"]["conf"], 0.95)
+        self.assertEqual(metadata["point_count"], 3)
+        self.assertIn("target_minus_semantic_centroid_wall_m", metadata)
 
 
 if __name__ == "__main__":

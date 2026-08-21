@@ -14,6 +14,7 @@ from .analysis import (
     load_annotations,
     load_wall_calibration,
     save_annotation,
+    save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
     segment_dominant_planes,
     split_plane_labels_by_connectivity,
@@ -355,7 +356,23 @@ def create_pointcloud_app(
                 stride=int(body.get("stride", 3)),
                 max_points=int(body.get("max_points", 1_000_000)),
                 min_plane_points=int(body.get("min_plane_points", 300)),
+                include_highest_confidence_semantic_cloud=True,
             )
+            semantic_cloud = analysis.pop(
+                "_highest_confidence_semantic_cloud", None
+            )
+            if semantic_cloud is not None:
+                analysis["yolo"]["saved_pointcloud"] = (
+                    save_highest_confidence_semantic_pointcloud(
+                        root,
+                        session_id,
+                        frame_id,
+                        semantic_cloud,
+                        target_camera_m=target,
+                    )
+                )
+            else:
+                analysis["yolo"]["saved_pointcloud"] = None
             record = save_annotation(
                 root,
                 session_id,

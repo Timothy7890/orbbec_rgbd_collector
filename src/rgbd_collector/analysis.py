@@ -1082,6 +1082,7 @@ def analyze_frame(
     min_plane_points: int = 300,
     use_saved_wall_calibration: bool = True,
     include_plane_debug: bool = False,
+    include_highest_confidence_semantic_cloud: bool = False,
 ) -> dict[str, Any]:
     if min_plane_points < 3:
         raise ValueError("最少平面点数不能小于 3")
@@ -1182,7 +1183,7 @@ def analyze_frame(
     clusters = semantic_clusters(
         cloud["xyz"], metadata, boxes or [], plane
     )
-    return {
+    result = {
         "session_id": session_id,
         "frame_id": frame_id,
         "point_count": int(cloud.shape[0]),
@@ -1195,6 +1196,17 @@ def analyze_frame(
         },
         "source": metadata,
     }
+    if include_highest_confidence_semantic_cloud:
+        result["_highest_confidence_semantic_cloud"] = (
+            highest_confidence_semantic_pointcloud(
+                cloud["xyz"],
+                cloud["rgba"],
+                metadata,
+                boxes or [],
+                plane,
+            )
+        )
+    return result
 
 
 def semantic_clusters(
@@ -1206,6 +1218,109 @@ def semantic_clusters(
     if not boxes:
         return []
     points = np.asarray(points_xyz, dtype=np.float64)
+    u, v, protrusion, image_shape = _semantic_projection(
+        points, metadata, plane
+    )
+    clusters: list[dict[str, Any]] = []
+    for index, box in enumerate(boxes):
+        try:
+            x1, y1, x2, y2 = [float(value) for value in box["xyxy"]]
+        except (KeyError, TypeError, ValueError):
+            continue
+        object_mask, foreground_only = _semantic_object_mask(
+            u, v, protrusion, box, image_shape
+        )
+        cluster_points = points[object_mask]
+        if cluster_points.shape[0] < 3:
+            continue
+        centroid = np.median(cluster_points, axis=0)
+        clusters.append(
+            {
+                "box_index": index,
+                "cls": int(box.get("cls", -1)),
+                "name": str(box.get("name", box.get("cls", "unknown"))),
+                "conf": float(box.get("conf", 0.0)),
+                "xyxy": [x1, y1, x2, y2],
+                "point_count": int(cluster_points.shape[0]),
+                "foreground_only": foreground_only,
+                "centroid_camera_m": centroid.tolist(),
+                "centroid_plane_coordinates_m": target_plane_coordinates(
+                    centroid.tolist(), plane
+                ),
+            }
+        )
+    return clusters
+
+
+def highest_confidence_semantic_pointcloud(
+    points_xyz: np.ndarray,
+    point_rgba: np.ndarray,
+    metadata: dict[str, Any],
+    boxes: list[dict[str, Any]],
+    plane: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not boxes:
+        return None
+    valid_boxes = [
+        (index, box)
+        for index, box in enumerate(boxes)
+        if np.isfinite(float(box.get("conf", 0.0)))
+    ]
+    if not valid_boxes:
+        return None
+    box_index, box = max(
+        valid_boxes, key=lambda item: float(item[1].get("conf", 0.0))
+    )
+    try:
+        xyxy = [float(value) for value in box["xyxy"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    points = np.asarray(points_xyz, dtype=np.float64)
+    rgba = np.asarray(point_rgba, dtype=np.uint8)
+    if rgba.shape != (points.shape[0], 4):
+        raise ValueError("点云颜色必须是 N×4 RGBA 数组")
+    u, v, protrusion, image_shape = _semantic_projection(
+        points, metadata, plane
+    )
+    object_mask, foreground_only = _semantic_object_mask(
+        u, v, protrusion, box, image_shape
+    )
+    selected_points = points[object_mask]
+    if selected_points.shape[0] < 3:
+        return None
+
+    origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
+    wall_x, wall_y, wall_z = _wall_axes(plane)
+    axes = np.asarray((wall_x, wall_y, wall_z), dtype=np.float64)
+    wall_points = (selected_points - origin) @ axes.T
+    centroid_camera = np.median(selected_points, axis=0)
+    centroid_wall = np.median(wall_points, axis=0)
+    return {
+        "box_index": box_index,
+        "detection": {
+            "cls": int(box.get("cls", -1)),
+            "name": str(box.get("name", box.get("cls", "unknown"))),
+            "conf": float(box.get("conf", 0.0)),
+            "xyxy": xyxy,
+            "polygon": box.get("polygon"),
+        },
+        "foreground_only": foreground_only,
+        "xyz_camera_m": selected_points.astype(np.float32, copy=False),
+        "xyz_wall_m": wall_points.astype(np.float32, copy=False),
+        "rgb": rgba[object_mask, :3].copy(),
+        "centroid_camera_m": centroid_camera.tolist(),
+        "centroid_wall_m": centroid_wall.tolist(),
+        "coordinate_origin_camera_m": origin.tolist(),
+        "coordinate_axes_camera": axes.tolist(),
+    }
+
+
+def _semantic_projection(
+    points: np.ndarray,
+    metadata: dict[str, Any],
+    plane: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int] | None]:
     intrinsics = metadata["intrinsics"]
     z = points[:, 2]
     u = float(intrinsics["fx"]) * points[:, 0] / z + float(
@@ -1224,41 +1339,20 @@ def semantic_clusters(
         if isinstance(shape_value, (list, tuple)) and len(shape_value) == 2
         else None
     )
-    clusters: list[dict[str, Any]] = []
-    for index, box in enumerate(boxes):
-        try:
-            x1, y1, x2, y2 = [float(value) for value in box["xyxy"]]
-        except (KeyError, TypeError, ValueError):
-            continue
-        inside = detection_pixel_mask(
-            u, v, box, image_shape=image_shape
-        )
-        object_mask = inside & (protrusion >= 0.003) & (protrusion <= 0.15)
-        if int(object_mask.sum()) < 12:
-            object_mask = inside
-        cluster_points = points[object_mask]
-        if cluster_points.shape[0] < 3:
-            continue
-        centroid = np.median(cluster_points, axis=0)
-        clusters.append(
-            {
-                "box_index": index,
-                "cls": int(box.get("cls", -1)),
-                "name": str(box.get("name", box.get("cls", "unknown"))),
-                "conf": float(box.get("conf", 0.0)),
-                "xyxy": [x1, y1, x2, y2],
-                "point_count": int(cluster_points.shape[0]),
-                "foreground_only": bool(
-                    int((inside & (protrusion >= 0.003) & (protrusion <= 0.15)).sum())
-                    >= 12
-                ),
-                "centroid_camera_m": centroid.tolist(),
-                "centroid_plane_coordinates_m": target_plane_coordinates(
-                    centroid.tolist(), plane
-                ),
-            }
-        )
-    return clusters
+    return u, v, protrusion, image_shape
+
+
+def _semantic_object_mask(
+    u: np.ndarray,
+    v: np.ndarray,
+    protrusion: np.ndarray,
+    box: dict[str, Any],
+    image_shape: tuple[int, int] | None,
+) -> tuple[np.ndarray, bool]:
+    inside = detection_pixel_mask(u, v, box, image_shape=image_shape)
+    foreground = inside & (protrusion >= 0.003) & (protrusion <= 0.15)
+    foreground_only = int(foreground.sum()) >= 12
+    return (foreground if foreground_only else inside), foreground_only
 
 
 def target_plane_coordinates(
@@ -1561,6 +1655,120 @@ def apply_wall_calibration(
         if key in calibration:
             calibrated[key] = calibration[key]
     return calibrated
+
+
+def save_highest_confidence_semantic_pointcloud(
+    data_root: Path,
+    session_id: str,
+    frame_id: str,
+    semantic_cloud: dict[str, Any],
+    *,
+    target_camera_m: list[float] | None = None,
+) -> dict[str, Any]:
+    root = data_root.expanduser().resolve()
+    _, frame_dir = resolve_frame_paths(root, session_id, frame_id)
+    if not frame_dir.is_dir():
+        raise FileNotFoundError(f"帧不存在: {frame_id}")
+
+    xyz_camera = np.asarray(
+        semantic_cloud["xyz_camera_m"], dtype=np.float32
+    )
+    xyz_wall = np.asarray(semantic_cloud["xyz_wall_m"], dtype=np.float32)
+    rgb = np.asarray(semantic_cloud["rgb"], dtype=np.uint8)
+    if (
+        xyz_camera.ndim != 2
+        or xyz_camera.shape[1] != 3
+        or xyz_wall.shape != xyz_camera.shape
+        or rgb.shape != xyz_camera.shape
+        or xyz_camera.shape[0] < 3
+    ):
+        raise ValueError("YOLO 语义点云数组无效")
+    target: np.ndarray | None = None
+    if target_camera_m is not None:
+        target = np.asarray(target_camera_m, dtype=np.float64)
+        if target.shape != (3,) or not np.isfinite(target).all():
+            raise ValueError("目标点必须是三个有限数值")
+
+    output_dir = root / "yolo_semantic_pointclouds" / session_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_path = output_dir / f"{frame_id}.npz"
+    metadata_path = output_dir / f"{frame_id}.json"
+    fd, temporary_data = tempfile.mkstemp(
+        prefix=".yolo-pointcloud-", suffix=".npz", dir=output_dir
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            np.savez_compressed(
+                handle,
+                xyz_camera_m=xyz_camera,
+                xyz_wall_m=xyz_wall,
+                rgb=rgb,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_data, data_path)
+    finally:
+        if os.path.exists(temporary_data):
+            os.unlink(temporary_data)
+
+    summary: dict[str, Any] = {
+        "schema": "rgbd-yolo-semantic-pointcloud/v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "frame_id": frame_id,
+        "selection": "highest-confidence-only",
+        "box_index": int(semantic_cloud["box_index"]),
+        "detection": semantic_cloud["detection"],
+        "foreground_only": bool(semantic_cloud["foreground_only"]),
+        "point_count": int(xyz_camera.shape[0]),
+        "centroid_camera_m": semantic_cloud["centroid_camera_m"],
+        "centroid_wall_m": semantic_cloud["centroid_wall_m"],
+        "coordinate_origin_camera_m": semantic_cloud[
+            "coordinate_origin_camera_m"
+        ],
+        "coordinate_axes_camera": semantic_cloud[
+            "coordinate_axes_camera"
+        ],
+        "data_file": str(data_path.relative_to(root)),
+        "arrays": {
+            "xyz_camera_m": {"shape": list(xyz_camera.shape), "dtype": "float32"},
+            "xyz_wall_m": {"shape": list(xyz_wall.shape), "dtype": "float32"},
+            "rgb": {"shape": list(rgb.shape), "dtype": "uint8"},
+        },
+    }
+    if target is not None:
+        origin = np.asarray(
+            semantic_cloud["coordinate_origin_camera_m"], dtype=np.float64
+        )
+        axes = np.asarray(
+            semantic_cloud["coordinate_axes_camera"], dtype=np.float64
+        )
+        target_wall = (target - origin) @ axes.T
+        centroid_wall = np.asarray(
+            semantic_cloud["centroid_wall_m"], dtype=np.float64
+        )
+        summary["target_camera_m"] = target.tolist()
+        summary["target_wall_m"] = target_wall.tolist()
+        summary["target_minus_semantic_centroid_wall_m"] = (
+            target_wall - centroid_wall
+        ).tolist()
+
+    payload = json.dumps(
+        summary, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    fd, temporary_metadata = tempfile.mkstemp(
+        prefix=".yolo-pointcloud-", suffix=".json", dir=output_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_metadata, metadata_path)
+    finally:
+        if os.path.exists(temporary_metadata):
+            os.unlink(temporary_metadata)
+    return summary
 
 
 def _annotation_path(data_root: Path, session_id: str) -> Path:

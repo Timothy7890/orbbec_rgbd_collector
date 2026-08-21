@@ -43,6 +43,8 @@
     button:hover { background: #3274e6; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .secondary { background: #202938; border-color: var(--line); margin-top: 8px; }
+    .danger { background: #5c2024; border-color: #a83d45; margin-top: 8px; }
+    .danger:hover { background: #72282e; }
     .pick-active { background: #a56812; border-color: var(--orange); }
     .check {
       display: flex; align-items: center; gap: 8px; margin: 2px 0 12px;
@@ -281,12 +283,12 @@
       <label>墙面坐标微调步长（mm）
         <input id="nudgeStep" type="number" min="0.1" max="100" step="0.1" value="1">
       </label>
-      <label>点1找点算法版本
+      <label>自动找点算法版本
         <select id="targetFinderVersion">
           <option value="">正在加载…</option>
         </select>
       </label>
-      <button id="targetFinderBtn" class="secondary" disabled>算法找点1（Tab）</button>
+      <button id="targetFinderBtn" class="secondary" disabled>算法找点（Tab）</button>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <div id="cameraPlaneMetrics" class="pose-metrics">
@@ -308,11 +310,12 @@
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存点位 1（C）</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
+      <button id="deleteFrameBtn" class="danger" disabled>永久删除当前帧</button>
       <button id="resetBtn" class="secondary">重置视角</button>
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。勾选“YOLO Mask 内面板拟合”后，才会对最高置信度实例额外拟合局部平面，并显示一条完整长边和一条相邻短边；关闭时不会执行该算法。点击“算法找点1”或按 Tab，会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。勾选“YOLO Mask 内面板拟合”后，才会对最高置信度实例额外拟合局部平面，并显示一条完整长边和一条相邻短边；关闭时不会执行该算法。点击“算法找点”或按 Tab，会根据所选版本和检测类别生成对应点位初值；0.2.0-s 对“远方”生成点1，对“就地”生成点3。生成后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -649,6 +652,7 @@
       const session = $("session").value;
       if (!session) {
         $("frame").innerHTML = "";
+        $("deleteFrameBtn").disabled = true;
         setStatus("没有可用拍摄会话");
         return;
       }
@@ -660,6 +664,7 @@
         $("frame").value = previous;
       else if ($("frame").options.length)
         $("frame").selectedIndex = $("frame").options.length - 1;
+      $("deleteFrameBtn").disabled = !$("frame").value;
       rememberSelection();
     }
 
@@ -765,7 +770,7 @@
       $("targetFinderBtn").disabled = !select.value;
     }
 
-    async function findPointOne() {
+    async function findTargetPoint() {
       const session = $("session").value, frame = $("frame").value;
       const version = $("targetFinderVersion").value;
       if (!session || !frame) throw new Error("请先选择会话和帧");
@@ -777,7 +782,7 @@
           selectedModel?.dataset.requiresSavedCoordinate === "true" &&
           !currentAnalysis?.plane?.calibrated)
         throw new Error(`算法 ${version} 仅支持已保存坐标系的帧`);
-      setStatus(`正在使用算法 ${version} 查找点1…`);
+      setStatus(`正在使用算法 ${version} 查找目标点…`);
       const data = await json(
         `/api/target-finder/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
         {
@@ -797,7 +802,8 @@
         $("yoloPanelFit").checked = true;
         rebuildYoloPanelOverlay();
       }
-      activatePointSlot(1, false);
+      const targetPointSlot = Number(prediction.target_point_slot || 1);
+      activatePointSlot(targetPointSlot, false);
       selectedTarget = [...prediction.target_camera_m];
       selectedPixel = null;
       selectionSource = prediction.selection_source;
@@ -810,9 +816,9 @@
         z_m: prediction.target_wall_m[2],
       };
       targetSemanticCoordinates = {
-        x_m: prediction.model.offset_wall_m[0],
-        y_m: prediction.model.offset_wall_m[1],
-        z_m: prediction.model.offset_wall_m[2],
+        x_m: prediction.offset_wall_m[0],
+        y_m: prediction.offset_wall_m[1],
+        z_m: prediction.offset_wall_m[2],
       };
       targetFinderPrediction = prediction;
       focusOrbitOn(selectedTarget);
@@ -821,11 +827,11 @@
       renderRgbOverlay();
       const validation = prediction.validation;
       setStatus(
-        `算法 ${version} 已找到点1`,
+        `算法 ${version} 已找到点${targetPointSlot}`,
         false,
         validation
-          ? `与该帧已标注点1相差 ${(validation.error_distance_m * 1000).toFixed(1)} mm；绿色虚线点为原始点，按 C 后才覆盖`
-          : "该帧没有已标注点1可供验证；可微调后按 C 保存"
+          ? `与该帧已标注点${targetPointSlot}相差 ${(validation.error_distance_m * 1000).toFixed(1)} mm；绿色虚线点为原始点，按 C 后才覆盖`
+          : `该帧没有已标注点${targetPointSlot}可供验证；可微调后按 C 保存`
       );
     }
 
@@ -1575,9 +1581,15 @@
         const validation = targetFinderPrediction.validation;
         if (validation) {
           const error = validation.prediction_minus_reference_wall_m;
-          lines.push("原始已保存点1: 同时显示，按 C 前不会覆盖");
+          const validatedSlot =
+            validation.reference_point_slot ||
+            targetFinderPrediction.target_point_slot ||
+            activePointSlot;
           lines.push(
-            `对已有点1验证误差 mm: dX ${(error[0] * 1000).toFixed(1)}, ` +
+            `原始已保存点${validatedSlot}: 同时显示，按 C 前不会覆盖`
+          );
+          lines.push(
+            `对已有点${validatedSlot}验证误差 mm: dX ${(error[0] * 1000).toFixed(1)}, ` +
             `dY ${(error[1] * 1000).toFixed(1)}, ` +
             `dZ ${(error[2] * 1000).toFixed(1)}, ` +
             `距离 ${(validation.error_distance_m * 1000).toFixed(1)}`
@@ -2076,6 +2088,65 @@
       return true;
     }
 
+    async function deleteCurrentFrame() {
+      const session = $("session").value;
+      const frame = $("frame").value;
+      if (!session || !frame) {
+        setStatus("请先选择要删除的帧", true);
+        return;
+      }
+      const options = [...$("frame").options];
+      const currentIndex = $("frame").selectedIndex;
+      const adjacentFrame =
+        options[currentIndex + 1]?.value ||
+        options[currentIndex - 1]?.value ||
+        "";
+      const confirmed = window.confirm(
+        `确定永久删除当前帧？\n\n${frame}\n\n` +
+        "RGB、深度、点位标注、已保存坐标系、YOLO 点云和批量派生记录都会一起删除，且无法恢复。"
+      );
+      if (!confirmed) return;
+
+      const button = $("deleteFrameBtn");
+      button.disabled = true;
+      setStatus("正在永久删除当前帧…", false, `<br>${escapeHtml(frame)}`);
+      try {
+        const result = await json(
+          `/api/frames/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
+          {method: "DELETE"}
+        );
+        await refreshSessions(true);
+        if (
+          adjacentFrame &&
+          [...$("frame").options].some(option => option.value === adjacentFrame)
+        ) {
+          $("frame").value = adjacentFrame;
+          rememberSelection();
+        }
+        if ($("frame").value) {
+          await loadCloud();
+          setStatus(
+            "当前帧已永久删除",
+            false,
+            `<br>${escapeHtml(frame)}<br>当前会话剩余 ${result.remaining_frame_count} 帧`
+          );
+        } else {
+          frameLoadToken++;
+          analysisRequestToken++;
+          pointCount = 0;
+          currentAnalysis = null;
+          selectedTarget = null;
+          rebuildSemanticMarkers();
+          rebuildPlaneAxesOverlay();
+          rebuildYoloPanelOverlay();
+          $("hud").textContent = "0 points";
+          setStatus("当前帧已永久删除，当前会话已无帧");
+        }
+      } finally {
+        button.disabled = !$("frame").value;
+      }
+    }
+
     function setStatus(title, error = false, detail = "") {
       $("status").className = "status" + (error ? " error" : "");
       $("status").innerHTML = `<strong>${title}</strong>${detail}`;
@@ -2119,7 +2190,7 @@
     $("saveAllYoloPanelCentersBtn").onclick = () =>
       saveAllYoloPanelCenters().catch(e => setStatus(e.message, true));
     $("targetFinderBtn").onclick = () =>
-      findPointOne().catch(e => setStatus(e.message, true));
+      findTargetPoint().catch(e => setStatus(e.message, true));
     $("coordinateBtn").onclick = () => {
       if (!wallAxes(currentAnalysis?.plane)) {
         setStatus("请先分析墙面", true);
@@ -2142,6 +2213,8 @@
       });
     $("saveBtn").onclick = () => saveCurrentAnnotation().catch(e => setStatus(e.message, true));
     $("refreshBtn").onclick = () => refreshSessions().catch(e => setStatus(e.message, true));
+    $("deleteFrameBtn").onclick = () =>
+      deleteCurrentFrame().catch(e => setStatus(e.message, true));
     $("resetBtn").onclick = resetView;
     document.addEventListener("keydown", event => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -2166,7 +2239,7 @@
       }
       if (event.code === "Tab") {
         if (!event.repeat)
-          findPointOne().catch(error => setStatus(error.message, true));
+          findTargetPoint().catch(error => setStatus(error.message, true));
         event.preventDefault();
         return;
       }

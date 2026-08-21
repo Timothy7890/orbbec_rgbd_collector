@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3063,3 +3064,155 @@ def save_annotation(
         if os.path.exists(temp_name):
             os.unlink(temp_name)
     return record
+
+
+def delete_frame_and_artifacts(
+    data_root: Path, session_id: str, frame_id: str
+) -> dict[str, Any]:
+    """Permanently delete one captured frame and all known frame artifacts."""
+
+    root = data_root.expanduser().resolve()
+    session_dir, frame_dir = resolve_frame_paths(root, session_id, frame_id)
+    if not frame_dir.is_dir():
+        raise FileNotFoundError(f"帧不存在: {frame_id}")
+
+    calibration_path = (
+        root
+        / "wall_coordinate_calibrations"
+        / session_id
+        / f"{frame_id}.json"
+    )
+    had_calibration = calibration_path.is_file()
+
+    shutil.rmtree(frame_dir)
+
+    def write_text_atomic(path: Path, payload: str, prefix: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=prefix, suffix=path.suffix, dir=path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    def filter_jsonl(path: Path) -> int:
+        if not path.is_file():
+            return 0
+        kept_lines: list[str] = []
+        removed = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                kept_lines.append(line)
+                continue
+            if record.get("frame_id") == frame_id:
+                removed += 1
+            else:
+                kept_lines.append(
+                    json.dumps(
+                        record,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+        payload = "".join(f"{line}\n" for line in kept_lines if line.strip())
+        write_text_atomic(path, payload, f".{path.stem}-delete-")
+        return removed
+
+    manifest_removed = filter_jsonl(session_dir / "manifest.jsonl")
+    annotation_removed = filter_jsonl(session_dir / "annotations.jsonl")
+
+    removed_artifact_files: list[str] = []
+    for path in (
+        calibration_path,
+        root / "yolo_semantic_pointclouds" / session_id / f"{frame_id}.npz",
+        root / "yolo_semantic_pointclouds" / session_id / f"{frame_id}.json",
+    ):
+        if path.is_file():
+            path.unlink()
+            removed_artifact_files.append(str(path.relative_to(root)))
+
+    remaining_annotations = load_annotations(root, session_id)
+
+    def update_measurements(path: Path, *, panel_centers: bool) -> None:
+        if not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        measurements = payload.get("frames")
+        if not isinstance(measurements, list):
+            return
+        filtered = [
+            item
+            for item in measurements
+            if not isinstance(item, dict) or item.get("frame_id") != frame_id
+        ]
+        if len(filtered) == len(measurements):
+            return
+        payload["frames"] = filtered
+        payload["frame_count"] = len(filtered)
+        payload["success_count"] = sum(
+            isinstance(item, dict) and bool(item.get("ok"))
+            for item in filtered
+        )
+        payload["failure_count"] = (
+            len(filtered) - int(payload["success_count"])
+        )
+        if isinstance(payload.get("total_session_frame_count"), int):
+            payload["total_session_frame_count"] = max(
+                0, payload["total_session_frame_count"] - 1
+            )
+        if (
+            not had_calibration
+            and isinstance(payload.get("skipped_uncalibrated_count"), int)
+        ):
+            payload["skipped_uncalibrated_count"] = max(
+                0, payload["skipped_uncalibrated_count"] - 1
+            )
+        if panel_centers:
+            payload["target_relationships"] = (
+                summarize_panel_center_target_relationships(
+                    filtered, remaining_annotations
+                )
+            )
+        write_text_atomic(
+            path,
+            json.dumps(
+                payload, ensure_ascii=False, indent=2, sort_keys=True
+            )
+            + "\n",
+            f".{path.stem}-delete-",
+        )
+
+    update_measurements(
+        root / "camera_plane_pose_measurements" / f"{session_id}.json",
+        panel_centers=False,
+    )
+    update_measurements(
+        root / "yolo_panel_center_measurements" / f"{session_id}.json",
+        panel_centers=True,
+    )
+
+    remaining_frame_count = sum(
+        1
+        for path in (session_dir / "frames").iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    return {
+        "status": "deleted",
+        "session_id": session_id,
+        "frame_id": frame_id,
+        "remaining_frame_count": remaining_frame_count,
+        "manifest_records_removed": manifest_removed,
+        "annotation_records_removed": annotation_removed,
+        "removed_artifact_files": removed_artifact_files,
+    }

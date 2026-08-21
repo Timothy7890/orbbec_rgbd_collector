@@ -144,6 +144,100 @@ class TargetFinderTests(unittest.TestCase):
                 },
             )
 
+    def test_version_0_2_0_s_generates_point_one_for_remote(self) -> None:
+        plane = {
+            "calibrated": True,
+            "origin_camera_m": [1.0, 2.0, 3.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 1.0, 0.0],
+            "z_axis_camera": [0.0, 0.0, 1.0],
+        }
+        panel_center_wall = np.array([0.12, -0.01, 0.20])
+        prediction = predict_target_one(
+            None,
+            version="0.2.0-s",
+            panel_fit={
+                "available": True,
+                "rectangle_center_camera_m": (
+                    np.asarray(plane["origin_camera_m"])
+                    + panel_center_wall
+                ).tolist(),
+                "detection": {"name": "远方", "conf": 0.95},
+            },
+            plane=plane,
+        )
+
+        self.assertEqual(prediction["target_point_slot"], 1)
+        self.assertEqual(prediction["matched_detection_name"], "远方")
+        np.testing.assert_allclose(
+            prediction["offset_wall_m"],
+            [0.04793951829, 0.00586060655, -0.01953248751],
+            atol=1e-12,
+        )
+
+    def test_version_0_2_0_s_generates_point_three_for_local(self) -> None:
+        plane = {
+            "calibrated": True,
+            "origin_camera_m": [1.0, 2.0, 3.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 1.0, 0.0],
+            "z_axis_camera": [0.0, 0.0, 1.0],
+        }
+        panel_center_wall = np.array([0.12, -0.01, 0.20])
+        expected_wall = panel_center_wall + np.array(
+            [-0.04793951829, 0.00586060655, -0.01953248751]
+        )
+        expected_camera = (
+            np.asarray(plane["origin_camera_m"]) + expected_wall
+        )
+        prediction = predict_target_one(
+            None,
+            version="0.2.0-s",
+            reference_targets_camera_m={
+                "3": (expected_camera + [0.001, 0.0, 0.0]).tolist()
+            },
+            panel_fit={
+                "available": True,
+                "rectangle_center_camera_m": (
+                    np.asarray(plane["origin_camera_m"])
+                    + panel_center_wall
+                ).tolist(),
+                "detection": {"name": "就地", "conf": 0.95},
+            },
+            plane=plane,
+        )
+
+        self.assertEqual(prediction["target_point_slot"], 3)
+        self.assertEqual(prediction["matched_detection_name"], "就地")
+        np.testing.assert_allclose(
+            prediction["target_wall_m"], expected_wall, atol=1e-12
+        )
+        self.assertEqual(
+            prediction["validation"]["reference_point_slot"], 3
+        )
+        self.assertAlmostEqual(
+            prediction["validation"]["error_distance_m"], 0.001
+        )
+
+    def test_version_0_2_0_s_rejects_unknown_detection_class(self) -> None:
+        with self.assertRaisesRegex(ValueError, "不支持检测类别"):
+            predict_target_one(
+                None,
+                version="0.2.0-s",
+                panel_fit={
+                    "available": True,
+                    "rectangle_center_camera_m": [0.0, 0.0, 1.0],
+                    "detection": {"name": "其他", "conf": 0.95},
+                },
+                plane={
+                    "calibrated": True,
+                    "origin_camera_m": [0.0, 0.0, 0.0],
+                    "x_axis_camera": [1.0, 0.0, 0.0],
+                    "y_axis_camera": [0.0, 1.0, 0.0],
+                    "z_axis_camera": [0.0, 0.0, 1.0],
+                },
+            )
+
     def test_unknown_model_version_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "未知找点算法版本"):
             predict_target_one(self.semantic_cloud(), version="9.9.9")

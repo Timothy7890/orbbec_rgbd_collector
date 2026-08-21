@@ -14,6 +14,7 @@ from rgbd_collector.analysis import (
     build_accepted_wall_calibration,
     build_wall_calibration,
     camera_plane_pose_metrics,
+    delete_frame_and_artifacts,
     describe_p0_boundary_lines,
     describe_segmented_plane_axes,
     estimate_wall_x_from_p0_boundary_lines,
@@ -41,6 +42,125 @@ from test_storage import camera_metadata, make_frame
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_delete_frame_removes_capture_and_all_known_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "delete-frame", camera_metadata())
+            deleted_frame = session.enqueue(make_frame(1), "manual")
+            kept_frame = session.enqueue(make_frame(2), "manual")
+            session.close()
+
+            annotations = [
+                {
+                    "frame_id": frame_id,
+                    "points": {
+                        "1": {
+                            "target_plane_coordinates_m": {
+                                "x_m": 0.1,
+                                "y_m": 0.0,
+                                "z_m": 0.2,
+                            }
+                        }
+                    },
+                }
+                for frame_id in (deleted_frame, kept_frame)
+            ]
+            (session.path / "annotations.jsonl").write_text(
+                "".join(json.dumps(item) + "\n" for item in annotations),
+                encoding="utf-8",
+            )
+
+            calibration = (
+                root
+                / "wall_coordinate_calibrations"
+                / session.session_id
+                / f"{deleted_frame}.json"
+            )
+            calibration.parent.mkdir(parents=True)
+            calibration.write_text("{}", encoding="utf-8")
+
+            semantic_dir = (
+                root / "yolo_semantic_pointclouds" / session.session_id
+            )
+            semantic_dir.mkdir(parents=True)
+            for suffix in (".npz", ".json"):
+                (semantic_dir / f"{deleted_frame}{suffix}").write_bytes(b"x")
+
+            measurements = [
+                {
+                    "ok": True,
+                    "frame_id": frame_id,
+                    "rectangle_center_wall_m": [0.0, 0.0, 0.0],
+                }
+                for frame_id in (deleted_frame, kept_frame)
+            ]
+            for directory in (
+                "camera_plane_pose_measurements",
+                "yolo_panel_center_measurements",
+            ):
+                path = root / directory / f"{session.session_id}.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "frames": measurements,
+                            "frame_count": 2,
+                            "success_count": 2,
+                            "failure_count": 0,
+                            "total_session_frame_count": 2,
+                            "skipped_uncalibrated_count": 0,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            result = delete_frame_and_artifacts(
+                root, session.session_id, deleted_frame
+            )
+
+            self.assertEqual(result["remaining_frame_count"], 1)
+            self.assertFalse(
+                (session.path / "frames" / deleted_frame).exists()
+            )
+            self.assertTrue((session.path / "frames" / kept_frame).is_dir())
+            manifest = [
+                json.loads(line)
+                for line in (session.path / "manifest.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                [item["frame_id"] for item in manifest], [kept_frame]
+            )
+            self.assertEqual(
+                [item["frame_id"] for item in load_annotations(
+                    root, session.session_id
+                )],
+                [kept_frame],
+            )
+            self.assertFalse(calibration.exists())
+            self.assertFalse(
+                (semantic_dir / f"{deleted_frame}.npz").exists()
+            )
+            self.assertFalse(
+                (semantic_dir / f"{deleted_frame}.json").exists()
+            )
+            for directory in (
+                "camera_plane_pose_measurements",
+                "yolo_panel_center_measurements",
+            ):
+                payload = json.loads(
+                    (
+                        root / directory / f"{session.session_id}.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(payload["frame_count"], 1)
+                self.assertEqual(payload["success_count"], 1)
+                self.assertEqual(
+                    [item["frame_id"] for item in payload["frames"]],
+                    [kept_frame],
+                )
+
     def test_camera_plane_pose_matches_ik_perpendicular_convention(self) -> None:
         front_facing = camera_plane_pose_metrics(
             {

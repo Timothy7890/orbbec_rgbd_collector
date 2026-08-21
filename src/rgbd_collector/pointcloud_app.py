@@ -14,6 +14,7 @@ from .analysis import (
     apply_wall_calibration,
     build_accepted_wall_calibration,
     build_wall_calibration,
+    delete_frame_and_artifacts,
     measure_frame_camera_plane_pose,
     load_annotations,
     load_wall_calibration,
@@ -333,6 +334,17 @@ def create_pointcloud_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "session_id": session_id, "frames": items}
 
+    @app.delete("/api/frames/{session_id}/{frame_id}")
+    def delete_frame(session_id: str, frame_id: str):
+        try:
+            result = delete_frame_and_artifacts(root, session_id, frame_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        analysis_cache.pop((session_id, frame_id), None)
+        return {"ok": True, **result}
+
     @app.get("/api/rgb/{session_id}/{frame_id}")
     def rgb_frame(session_id: str, frame_id: str):
         try:
@@ -612,21 +624,27 @@ def create_pointcloud_app(
                     semantic_cloud, submitted_plane
                 )
 
-            reference_target = None
+            reference_targets: dict[str, list[float]] = {}
             for annotation in load_annotations(root, session_id):
                 if annotation.get("frame_id") != frame_id:
                     continue
                 points = annotation.get("points")
-                point_one = points.get("1") if isinstance(points, dict) else None
-                if isinstance(point_one, dict):
-                    reference_target = point_one.get("target_camera_m")
+                if isinstance(points, dict):
+                    for slot, point in points.items():
+                        if (
+                            isinstance(point, dict)
+                            and isinstance(point.get("target_camera_m"), list)
+                        ):
+                            reference_targets[str(slot)] = point[
+                                "target_camera_m"
+                            ]
                 elif annotation.get("target_camera_m") is not None:
-                    reference_target = annotation["target_camera_m"]
+                    reference_targets["1"] = annotation["target_camera_m"]
                 break
             prediction = predict_target_one(
                 semantic_cloud,
                 version=version,
-                reference_target_camera_m=reference_target,
+                reference_targets_camera_m=reference_targets,
                 panel_fit=panel_fit,
                 plane=(
                     submitted_plane

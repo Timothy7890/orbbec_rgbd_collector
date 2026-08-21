@@ -459,6 +459,8 @@
     let planeAxisOverlays = [];
     let yoloPanelEdgeOverlays = [];
     let yoloPanelPlaneOverlay = null;
+    let panelClassificationGlBuffer = null;
+    let panelClassificationCount = 0;
     let frameLoadToken = 0;
     let analysisRequestToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
@@ -578,6 +580,21 @@
         gl.uniform1f(locations.pointSize, Number($("pointSize").value));
         gl.uniform2f(locations.pan, panX, panY);
         gl.drawArrays(gl.POINTS, 0, pointCount);
+        if (panelClassificationCount && $("yoloPanelFit").checked) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, panelClassificationGlBuffer);
+          gl.vertexAttribPointer(
+            locations.position, 3, gl.FLOAT, false, 16, 0
+          );
+          gl.vertexAttribPointer(
+            locations.color, 4, gl.UNSIGNED_BYTE, true, 16, 12
+          );
+          gl.uniform1f(
+            locations.pointSize, Number($("pointSize").value) + 2
+          );
+          gl.disable(gl.DEPTH_TEST);
+          gl.drawArrays(gl.POINTS, 0, panelClassificationCount);
+          gl.enable(gl.DEPTH_TEST);
+        }
       }
       updateTargetMarker();
       updateTargetFinderReferenceMarker();
@@ -1324,7 +1341,39 @@
       }
     }
 
+    function rebuildPanelClassificationBuffer() {
+      panelClassificationCount = 0;
+      const preview =
+        currentAnalysis?.yolo_panel_fit?.classification_preview;
+      if (!$("yoloPanelFit").checked || !preview) return;
+      const kept = preview.kept_camera_m || [];
+      const removed = preview.removed_camera_m || [];
+      const total = kept.length + removed.length;
+      if (!total) return;
+      const data = new ArrayBuffer(total * 16);
+      const view = new DataView(data);
+      let offset = 0;
+      const write = (point, r, g, b) => {
+        view.setFloat32(offset, point[0], true);
+        view.setFloat32(offset + 4, point[1], true);
+        view.setFloat32(offset + 8, point[2], true);
+        view.setUint8(offset + 12, r);
+        view.setUint8(offset + 13, g);
+        view.setUint8(offset + 14, b);
+        view.setUint8(offset + 15, 255);
+        offset += 16;
+      };
+      for (const point of kept) write(point, 45, 255, 150);
+      for (const point of removed) write(point, 255, 60, 60);
+      if (!panelClassificationGlBuffer)
+        panelClassificationGlBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, panelClassificationGlBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(data), gl.STATIC_DRAW);
+      panelClassificationCount = total;
+    }
+
     function rebuildYoloPanelOverlay() {
+      rebuildPanelClassificationBuffer();
       const overlay = $("yoloPanelOverlay");
       overlay.replaceChildren();
       yoloPanelEdgeOverlays = [];
@@ -1520,18 +1569,34 @@
           lines.push(
             `YOLO 面板拟合: ${panel.detection?.name || "实例"} · ` +
             `内点 ${(panel.inlier_ratio * 100).toFixed(1)}% · ` +
-            `RMS ${(panel.rms_m * 1000).toFixed(2)} mm`
+            `RMS ${(panel.rms_m * 1000).toFixed(2)} mm · ` +
+            `方向 ${panel.orientation_source === "wall-frame"
+              ? "箱体坐标系" : "边界直线"}`
           );
           lines.push(
             `面板长短边: ${(panel.long_length_m * 1000).toFixed(1)} × ` +
             `${(panel.short_length_m * 1000).toFixed(1)} mm · ` +
             `主连通域 ${(panel.component_point_count ?? 0).toLocaleString()} 点 · ` +
+            `深色剔除 ${(panel.color_filter?.removed_point_count ?? 0)
+              .toLocaleString()} 点 · ` +
             `剔除 ${panel.excluded_point_count.toLocaleString()} 点`
           );
         } else if (panel) {
           lines.push(`YOLO 面板拟合: 不可用 · ${panel.reason}`);
         } else {
           lines.push("YOLO 面板拟合: 等待分析");
+        }
+        const preview = panel?.classification_preview;
+        if (preview) {
+          lines.push(
+            `二值分类: 保留(绿) ${preview.kept_point_count
+              .toLocaleString()} 点 · ` +
+            `深色剔除(红) ${preview.removed_point_count
+              .toLocaleString()} 点 · ` +
+            `阈值 ${panel.color_filter?.enabled
+              ? panel.color_filter.brightness_threshold.toFixed(0)
+              : "未启用"}`
+          );
         }
       }
       local = wallCoordinates(local);

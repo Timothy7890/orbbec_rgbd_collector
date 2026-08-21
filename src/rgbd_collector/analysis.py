@@ -1220,8 +1220,14 @@ def fit_yolo_panel_rectangle(
     min_inlier_ratio: float = 0.35,
     grid_cell_m: float = 0.002,
     seed: int = 0,
+    preferred_axes_camera: tuple[Any, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fit a local panel plane and a supported orthogonal L-shaped outline."""
+    """Fit a local panel plane and a supported orthogonal L-shaped outline.
+
+    When ``preferred_axes_camera`` provides the wall/cabinet X and Z axes,
+    the rectangle orientation is taken from them (panel edges are parallel
+    to the cabinet frame) instead of being voted from boundary Hough lines.
+    """
     points = np.asarray(points_xyz, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 3:
         raise ValueError("YOLO Mask 点云必须是 N×3 数组")
@@ -1377,49 +1383,127 @@ def fit_yolo_panel_rectangle(
     if len(segments) < 2 or total_segment_length < 0.03:
         raise ValueError("面板边界直线长度不足")
     direction_tolerance_cos = float(np.cos(np.radians(15.0)))
-    best_orientation: tuple[float, np.ndarray, np.ndarray] | None = None
-    best_orientation_score = -1.0
-    for candidate in segments:
-        axis_a_candidate = np.asarray(candidate["direction"])
-        axis_b_candidate = np.array(
-            [-axis_a_candidate[1], axis_a_candidate[0]]
-        )
-        support_a = 0.0
-        support_b = 0.0
+
+    def aligned_segment_support(
+        axis_a_candidate: np.ndarray, axis_b_candidate: np.ndarray
+    ) -> float:
+        support = 0.0
         for segment in segments:
             direction = np.asarray(segment["direction"])
-            length = float(segment["length"])
-            alignment_a = abs(float(direction @ axis_a_candidate))
-            alignment_b = abs(float(direction @ axis_b_candidate))
-            if max(alignment_a, alignment_b) < direction_tolerance_cos:
-                continue
-            if alignment_a >= alignment_b:
-                support_a += length
-            else:
-                support_b += length
-        aligned_support = support_a + support_b
-        balance = min(support_a, support_b) / max(
-            support_a, support_b, 1e-9
-        )
-        score = aligned_support * (0.5 + 0.5 * balance)
-        if score > best_orientation_score:
-            best_orientation_score = score
-            best_orientation = (
-                aligned_support,
-                axis_a_candidate,
-                axis_b_candidate,
+            alignment = max(
+                abs(float(direction @ axis_a_candidate)),
+                abs(float(direction @ axis_b_candidate)),
             )
-    assert best_orientation is not None
-    aligned_support, axis_a, axis_b = best_orientation
-    orientation_concentration = float(
-        aligned_support / total_segment_length
-    )
-    if orientation_concentration < 0.35:
-        raise ValueError("面板边界方向不稳定")
+            if alignment >= direction_tolerance_cos:
+                support += float(segment["length"])
+        return support
+
+    # Prefer the wall/cabinet frame: panel edges are physically parallel to
+    # its X and Z axes, which avoids the angular error of Hough voting on a
+    # coarse raster. Fall back to boundary voting when the axes project
+    # poorly onto the local panel plane.
+    axis_a: np.ndarray | None = None
+    axis_b: np.ndarray | None = None
+    orientation_source = "boundary-hough"
+    if preferred_axes_camera is not None:
+        projected_axes: list[np.ndarray] = []
+        for axis_camera in preferred_axes_camera:
+            axis_3d = np.asarray(axis_camera, dtype=np.float64)
+            if (
+                axis_3d.shape != (3,)
+                or not np.isfinite(axis_3d).all()
+                or float(np.linalg.norm(axis_3d)) < 1e-6
+            ):
+                projected_axes = []
+                break
+            axis_3d = axis_3d / np.linalg.norm(axis_3d)
+            in_plane = axis_3d - float(axis_3d @ normal) * normal
+            in_plane_length = float(np.linalg.norm(in_plane))
+            if in_plane_length < 0.7:
+                projected_axes = []
+                break
+            projected_axes.append(
+                planar_basis.T @ (in_plane / in_plane_length)
+            )
+        if len(projected_axes) == 2:
+            axis_a = projected_axes[0] / np.linalg.norm(projected_axes[0])
+            perpendicular = np.array([-axis_a[1], axis_a[0]])
+            axis_b = (
+                perpendicular
+                if float(perpendicular @ projected_axes[1]) >= 0
+                else -perpendicular
+            )
+            orientation_source = "wall-frame"
+            orientation_concentration = float(
+                aligned_segment_support(axis_a, axis_b)
+                / total_segment_length
+            )
+
+    if axis_a is None or axis_b is None:
+        best_orientation: tuple[float, np.ndarray, np.ndarray] | None = None
+        best_orientation_score = -1.0
+        for candidate in segments:
+            axis_a_candidate = np.asarray(candidate["direction"])
+            axis_b_candidate = np.array(
+                [-axis_a_candidate[1], axis_a_candidate[0]]
+            )
+            support_a = 0.0
+            support_b = 0.0
+            for segment in segments:
+                direction = np.asarray(segment["direction"])
+                length = float(segment["length"])
+                alignment_a = abs(float(direction @ axis_a_candidate))
+                alignment_b = abs(float(direction @ axis_b_candidate))
+                if max(alignment_a, alignment_b) < direction_tolerance_cos:
+                    continue
+                if alignment_a >= alignment_b:
+                    support_a += length
+                else:
+                    support_b += length
+            aligned_support = support_a + support_b
+            balance = min(support_a, support_b) / max(
+                support_a, support_b, 1e-9
+            )
+            score = aligned_support * (0.5 + 0.5 * balance)
+            if score > best_orientation_score:
+                best_orientation_score = score
+                best_orientation = (
+                    aligned_support,
+                    axis_a_candidate,
+                    axis_b_candidate,
+                )
+        assert best_orientation is not None
+        aligned_support, axis_a, axis_b = best_orientation
+        orientation_concentration = float(
+            aligned_support / total_segment_length
+        )
+        if orientation_concentration < 0.35:
+            raise ValueError("面板边界方向不稳定")
+
+    def dense_extent(positions: np.ndarray) -> tuple[float, float]:
+        """Trim sparse tails (e.g. mask bleed) that survive quantiles."""
+        low_q, high_q = np.quantile(positions, [0.005, 0.995])
+        span = float(high_q - low_q)
+        if span < cell_size * 4:
+            return float(low_q), float(high_q)
+        bin_count = int(np.ceil(span / cell_size))
+        counts, bin_edges = np.histogram(
+            positions, bins=bin_count, range=(float(low_q), float(high_q))
+        )
+        occupied = counts[counts > 0]
+        cutoff = max(1.0, 0.25 * float(np.median(occupied)))
+        dense_bins = np.flatnonzero(counts >= cutoff)
+        if dense_bins.size == 0:
+            return float(low_q), float(high_q)
+        return (
+            float(bin_edges[dense_bins[0]]),
+            float(bin_edges[dense_bins[-1] + 1]),
+        )
+
     positions_a = component_planar @ axis_a
     positions_b = component_planar @ axis_b
-    a_min, a_max = np.quantile(positions_a, [0.01, 0.99])
-    b_min, b_max = np.quantile(positions_b, [0.01, 0.99])
+    a_min, a_max = dense_extent(positions_a)
+    b_min, b_max = dense_extent(positions_b)
     if a_max - a_min >= b_max - b_min:
         long_axis_2d, short_axis_2d = axis_a, axis_b
         long_min, long_max = float(a_min), float(a_max)
@@ -1428,10 +1512,7 @@ def fit_yolo_panel_rectangle(
         long_axis_2d, short_axis_2d = axis_b, -axis_a
         long_min, long_max = float(b_min), float(b_max)
         short_positions = component_planar @ short_axis_2d
-        short_min, short_max = [
-            float(value)
-            for value in np.quantile(short_positions, [0.01, 0.99])
-        ]
+        short_min, short_max = dense_extent(short_positions)
 
     angle_tolerance_cos = direction_tolerance_cos
     # Snapping tolerance scales with panel size so that, on a ~5 cm panel,
@@ -1464,8 +1545,24 @@ def fit_yolo_panel_rectangle(
                 candidates.append((offset, float(segment["length"])))
         if not candidates:
             return expected, 0.0
-        weights = np.asarray([item[1] for item in candidates])
-        values = np.asarray([item[0] for item in candidates])
+        # Average only the strongest cluster of parallel segments; a plain
+        # weighted mean would let mask-bleed contours a few millimetres
+        # outside the true edge drag the result outward.
+        cluster_width = threshold_m + cell_size
+        best_members: list[tuple[float, float]] = []
+        best_weight = -1.0
+        for anchor_offset, _ in candidates:
+            members = [
+                item
+                for item in candidates
+                if abs(item[0] - anchor_offset) <= cluster_width
+            ]
+            weight = sum(item[1] for item in members)
+            if weight > best_weight:
+                best_weight = weight
+                best_members = members
+        weights = np.asarray([item[1] for item in best_members])
+        values = np.asarray([item[0] for item in best_members])
         return (
             float(np.average(values, weights=weights)),
             float(weights.sum()),
@@ -1553,6 +1650,7 @@ def fit_yolo_panel_rectangle(
             long_length / max(short_length, 1e-9)
         ),
         "orientation_support": orientation_concentration,
+        "orientation_source": orientation_source,
         "edges": [
             {
                 "role": "long",
@@ -1576,6 +1674,56 @@ def fit_yolo_panel_rectangle(
     }
 
 
+def _bimodal_brightness_threshold(
+    brightness: np.ndarray,
+    *,
+    dark_fraction: float = 0.30,
+    min_separability: float = 0.5,
+) -> dict[str, float] | None:
+    """Split a bimodal brightness distribution (panel vs dark knob/gaps).
+
+    Returns a threshold biased toward the dark cluster so shadowed panel
+    edges survive, or ``None`` when the distribution is not bimodal.
+    """
+    counts, bin_edges = np.histogram(brightness, bins=64, range=(0, 255))
+    total = float(counts.sum())
+    if total < 1:
+        return None
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    total_sum = float((counts * centers).sum())
+    best_means: tuple[float, float] | None = None
+    best_between_var = -1.0
+    weight_dark = 0.0
+    sum_dark = 0.0
+    for index in range(1, 64):
+        weight_dark += float(counts[index - 1])
+        sum_dark += float(counts[index - 1]) * float(centers[index - 1])
+        weight_bright = total - weight_dark
+        if weight_dark == 0.0 or weight_bright == 0.0:
+            continue
+        mean_dark = sum_dark / weight_dark
+        mean_bright = (total_sum - sum_dark) / weight_bright
+        between_var = (
+            weight_dark * weight_bright * (mean_dark - mean_bright) ** 2
+        )
+        if between_var > best_between_var:
+            best_between_var = between_var
+            best_means = (mean_dark, mean_bright)
+    if best_means is None:
+        return None
+    variance = float(np.var(brightness))
+    separability = best_between_var / (total * total * variance + 1e-9)
+    if separability < min_separability:
+        return None
+    mean_dark, mean_bright = best_means
+    return {
+        "threshold": mean_dark + dark_fraction * (mean_bright - mean_dark),
+        "separability": float(separability),
+        "dark_cluster_mean": float(mean_dark),
+        "bright_cluster_mean": float(mean_bright),
+    }
+
+
 def analyze_yolo_mask_panel(
     points_xyz: np.ndarray,
     pixel_coordinates: np.ndarray,
@@ -1584,6 +1732,8 @@ def analyze_yolo_mask_panel(
     *,
     threshold_m: float = 0.004,
     min_points: int = 100,
+    wall_plane: dict[str, Any] | None = None,
+    point_rgba: np.ndarray | None = None,
 ) -> dict[str, Any]:
     if not boxes:
         return {"available": False, "reason": "当前帧没有 YOLO 实例"}
@@ -1610,6 +1760,71 @@ def analyze_yolo_mask_panel(
         pixels[:, 0], pixels[:, 1], box, image_shape=shape
     )
     mask_points = points[inside]
+    # Dark points (e.g. a black knob, its shadow, or dark bleed regions)
+    # confuse the outline; keep only points near the dominant panel
+    # brightness. The threshold adapts to lighting: the mask is panel
+    # dominated, so its median brightness tracks the panel colour.
+    color_filter: dict[str, Any] = {
+        "enabled": False,
+        "removed_point_count": 0,
+    }
+    removed_points = np.empty((0, 3), dtype=np.float64)
+    if point_rgba is not None:
+        rgba = np.asarray(point_rgba)
+        if (
+            rgba.ndim == 2
+            and rgba.shape[0] == points.shape[0]
+            and rgba.shape[1] >= 3
+        ):
+            brightness = (
+                rgba[inside, :3].astype(np.float64).mean(axis=1)
+            )
+            if brightness.size:
+                # A fixed fraction of the median fails when dark points
+                # (knob, shadows, gaps) dominate the mask; split the
+                # bimodal brightness distribution instead.
+                split = _bimodal_brightness_threshold(brightness)
+                if split is not None:
+                    keep = brightness >= split["threshold"]
+                    keep_ratio = float(keep.mean())
+                    # Guard: never remove nearly the whole mask.
+                    if keep_ratio >= 0.25:
+                        color_filter = {
+                            "enabled": True,
+                            "removed_point_count": int((~keep).sum()),
+                            "brightness_threshold": float(
+                                split["threshold"]
+                            ),
+                            "separability": split["separability"],
+                            "dark_cluster_mean": split[
+                                "dark_cluster_mean"
+                            ],
+                            "bright_cluster_mean": split[
+                                "bright_cluster_mean"
+                            ],
+                        }
+                        removed_points = mask_points[~keep]
+                        mask_points = mask_points[keep]
+
+    def _preview_points(
+        preview_source: np.ndarray, limit: int = 4_000
+    ) -> list[list[float]]:
+        source = preview_source[
+            np.isfinite(preview_source).all(axis=1)
+        ]
+        if source.shape[0] > limit:
+            indices = np.linspace(
+                0, source.shape[0] - 1, limit, dtype=np.int64
+            )
+            source = source[indices]
+        return np.round(source, 5).tolist()
+
+    classification_preview = {
+        "kept_point_count": int(mask_points.shape[0]),
+        "removed_point_count": int(removed_points.shape[0]),
+        "kept_camera_m": _preview_points(mask_points),
+        "removed_camera_m": _preview_points(removed_points),
+    }
     detection = {
         "box_index": int(box_index),
         "cls": int(box.get("cls", -1)),
@@ -1618,21 +1833,32 @@ def analyze_yolo_mask_panel(
         "xyxy": box.get("xyxy"),
         "used_polygon_mask": bool(box.get("polygon") is not None),
     }
+    preferred_axes: tuple[Any, Any] | None = None
+    if wall_plane is not None:
+        wall_x = wall_plane.get("x_axis_camera")
+        wall_z = wall_plane.get("z_axis_camera")
+        if wall_x is not None and wall_z is not None:
+            preferred_axes = (wall_x, wall_z)
     try:
         fitted = fit_yolo_panel_rectangle(
             mask_points,
             threshold_m=threshold_m,
             min_points=min_points,
             seed=20_000 + int(box_index),
+            preferred_axes_camera=preferred_axes,
         )
     except ValueError as exc:
         return {
             "available": False,
             "reason": str(exc),
             "mask_point_count": int(mask_points.shape[0]),
+            "color_filter": color_filter,
+            "classification_preview": classification_preview,
             "detection": detection,
         }
     fitted["mask_point_count"] = int(mask_points.shape[0])
+    fitted["color_filter"] = color_filter
+    fitted["classification_preview"] = classification_preview
     fitted["detection"] = detection
     return fitted
 
@@ -1673,7 +1899,7 @@ def analyze_frame(
         min_depth_m=min_depth_m,
         max_depth_m=max_depth_m,
         max_points=max_points,
-        include_pixels=run_plane_analysis or include_yolo_panel_fit,
+        include_pixels=run_plane_analysis,
     )
     pixel_coordinates = metadata.pop("_pixel_coordinates", None)
     if run_plane_analysis:
@@ -1791,12 +2017,27 @@ def analyze_frame(
         "source": metadata,
     }
     if include_yolo_panel_fit:
-        assert pixel_coordinates is not None
+        # The panel is small in the image; the shared, stride-subsampled
+        # cloud leaves too few mask points for stable edge support. Use a
+        # dedicated full-resolution reconstruction for the fit.
+        panel_cloud, panel_metadata = reconstruct_frame(
+            data_root,
+            session_id,
+            frame_id,
+            stride=1,
+            min_depth_m=min_depth_m,
+            max_depth_m=max_depth_m,
+            max_points=max_points,
+            include_pixels=True,
+        )
+        panel_pixels = panel_metadata.pop("_pixel_coordinates")
         result["yolo_panel_fit"] = analyze_yolo_mask_panel(
-            cloud["xyz"],
-            pixel_coordinates,
+            panel_cloud["xyz"],
+            panel_pixels,
             boxes or [],
-            metadata.get("image_shape"),
+            panel_metadata.get("image_shape"),
+            wall_plane=plane,
+            point_rgba=panel_cloud["rgba"],
         )
     if include_highest_confidence_semantic_cloud:
         result["_highest_confidence_semantic_cloud"] = (

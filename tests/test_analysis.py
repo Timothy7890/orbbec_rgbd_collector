@@ -1057,6 +1057,129 @@ class AnalysisTests(unittest.TestCase):
             self.assertLess(float(np.abs(endpoints[:, 0]).max()), 0.033)
             self.assertLess(float(np.abs(endpoints[:, 1]).max()), 0.032)
 
+    def test_yolo_panel_trims_attached_sparse_bleed_strip(self) -> None:
+        rng = np.random.default_rng(17)
+        count = 14_000
+        panel = np.column_stack(
+            (
+                rng.uniform(-0.027, 0.027, count),
+                rng.uniform(-0.0255, 0.0255, count),
+                0.5 + rng.normal(0.0, 0.0008, count),
+            )
+        )
+        # Sparse coplanar bleed attached to the right edge of the panel:
+        # connected in the raster, so component filtering alone keeps it.
+        bleed = np.column_stack(
+            (
+                rng.uniform(0.027, 0.035, 180),
+                rng.uniform(-0.0255, 0.0255, 180),
+                0.5 + rng.normal(0.0, 0.0008, 180),
+            )
+        )
+
+        fitted = fit_yolo_panel_rectangle(np.vstack((panel, bleed)))
+
+        self.assertTrue(fitted["available"])
+        self.assertAlmostEqual(fitted["long_length_m"], 0.054, delta=0.005)
+        self.assertAlmostEqual(fitted["short_length_m"], 0.051, delta=0.005)
+        corners = np.asarray(fitted["rectangle_corners_camera_m"])
+        self.assertLess(float(corners[:, 0].max()), 0.031)
+
+    def test_yolo_panel_uses_wall_frame_axes_when_provided(self) -> None:
+        rng = np.random.default_rng(23)
+        count = 16_000
+        angle = np.radians(17.0)
+        long_positions = rng.uniform(-0.14, 0.14, count)
+        short_positions = rng.uniform(-0.10, 0.10, count)
+        panel = np.column_stack(
+            (
+                long_positions * np.cos(angle)
+                - short_positions * np.sin(angle),
+                long_positions * np.sin(angle)
+                + short_positions * np.cos(angle),
+                0.8 + rng.normal(0.0, 0.0012, count),
+            )
+        )
+        wall_x = [np.cos(angle), np.sin(angle), 0.0]
+        wall_z = [-np.sin(angle), np.cos(angle), 0.0]
+
+        fitted = fit_yolo_panel_rectangle(
+            panel, preferred_axes_camera=(wall_x, wall_z)
+        )
+
+        self.assertTrue(fitted["available"])
+        self.assertEqual(fitted["orientation_source"], "wall-frame")
+        self.assertAlmostEqual(fitted["long_length_m"], 0.28, delta=0.012)
+        self.assertAlmostEqual(fitted["short_length_m"], 0.20, delta=0.012)
+        alignment = abs(
+            float(np.asarray(fitted["long_axis_camera"]) @ wall_x)
+        )
+        self.assertGreater(alignment, 0.999)
+
+        degenerate = fit_yolo_panel_rectangle(
+            panel,
+            preferred_axes_camera=([0.0, 0.0, 1.0], wall_z),
+        )
+        self.assertEqual(
+            degenerate["orientation_source"], "boundary-hough"
+        )
+
+    def test_yolo_panel_color_filter_removes_dark_overrun(self) -> None:
+        rng = np.random.default_rng(29)
+        count = 12_000
+        panel = np.column_stack(
+            (
+                rng.uniform(-0.027, 0.027, count),
+                rng.uniform(-0.0255, 0.0255, count),
+                0.5 + rng.normal(0.0, 0.0008, count),
+            )
+        )
+        # Dense, coplanar, attached dark region (e.g. black knob/bleed);
+        # geometry alone cannot separate it from the panel.
+        dark_count = 4_000
+        dark = np.column_stack(
+            (
+                rng.uniform(0.027, 0.045, dark_count),
+                rng.uniform(-0.0255, 0.0255, dark_count),
+                0.5 + rng.normal(0.0, 0.0008, dark_count),
+            )
+        )
+        points = np.vstack((panel, dark))
+        pixels = np.column_stack(
+            (
+                (points[:, 0] + 0.1) * 4000,
+                (points[:, 1] + 0.1) * 4000,
+            )
+        )
+        rgba = np.zeros((points.shape[0], 4), dtype=np.uint8)
+        rgba[:count, :3] = (0x68, 0x6F, 0x71)
+        rgba[count:, :3] = (0x0D, 0x13, 0x13)
+        rgba[:, 3] = 255
+        boxes = [
+            {"cls": 1, "name": "panel", "conf": 0.9, "xyxy": [0, 0, 900, 900]}
+        ]
+
+        unfiltered = analyze_yolo_mask_panel(
+            points, pixels, boxes, [900, 900]
+        )
+        filtered = analyze_yolo_mask_panel(
+            points, pixels, boxes, [900, 900], point_rgba=rgba
+        )
+
+        self.assertTrue(unfiltered["available"])
+        self.assertGreater(unfiltered["long_length_m"], 0.065)
+        self.assertTrue(filtered["available"])
+        self.assertTrue(filtered["color_filter"]["enabled"])
+        self.assertGreater(
+            filtered["color_filter"]["removed_point_count"], 3_500
+        )
+        self.assertAlmostEqual(
+            filtered["long_length_m"], 0.054, delta=0.005
+        )
+        self.assertAlmostEqual(
+            filtered["short_length_m"], 0.051, delta=0.005
+        )
+
     def test_yolo_panel_uses_highest_confidence_polygon(self) -> None:
         x_values, y_values = np.meshgrid(
             np.linspace(-0.12, 0.12, 100),

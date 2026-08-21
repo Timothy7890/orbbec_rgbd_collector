@@ -189,10 +189,12 @@ def create_pointcloud_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "annotations": records}
 
-    @app.get("/api/wall-calibration")
-    def wall_calibration():
+    @app.get("/api/wall-calibration/{session_id}/{frame_id}")
+    def wall_calibration(session_id: str, frame_id: str):
         try:
-            calibration = load_wall_calibration(root)
+            calibration = load_wall_calibration(root, session_id, frame_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "calibration": calibration}
@@ -226,7 +228,9 @@ def create_pointcloud_app(
                 "plane_inlier_ratio": analysis["plane"]["inlier_ratio"],
                 "plane_rms_m": analysis["plane"]["rms_m"],
             }
-            path = save_wall_calibration(root, calibration)
+            path = save_wall_calibration(
+                root, session_id, frame_id, calibration
+            )
             plane = apply_wall_calibration(analysis["plane"], calibration)
         except KeyError as exc:
             raise HTTPException(

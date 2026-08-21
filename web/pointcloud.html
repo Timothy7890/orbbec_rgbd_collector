@@ -213,13 +213,13 @@
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
-      <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
+      <button id="saveBtn" class="secondary" disabled>保存当前标注（C）</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
       <button id="resetBtn" class="secondary">重置视角</button>
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。左键拖动旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -376,6 +376,13 @@
     function resetView() {
       yaw = 0; pitch = 0; distance = Math.max(radius * 2.2, 0.3);
       panX = 0; panY = 0;
+    }
+
+    function focusOrbitOn(point) {
+      if (!Array.isArray(point) || point.length !== 3) return;
+      center = [...point];
+      panX = 0;
+      panY = 0;
     }
 
     function resize() {
@@ -586,6 +593,7 @@
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
       targetSaved = true;
+      selectionArmed = false;
       targetAdjustment =
         data.annotation.target_adjustment_camera_m || targetAdjustment;
       updateAnalysisPanel(
@@ -611,6 +619,7 @@
       const saved = (data.annotations || []).find(item => item.frame_id === frame);
       if (saved) {
         selectedTarget = saved.target_camera_m;
+        focusOrbitOn(selectedTarget);
         selectedPixel = saved.target_pixel || null;
         selectionSource = saved.selection_source || "pointcloud";
         targetSaved = true;
@@ -791,7 +800,8 @@
         lines.push(`墙面坐标 mm: X ${(local.x_m * 1000).toFixed(1)}, Y ${(local.y_m * 1000).toFixed(1)}, Z ${(local.z_m * 1000).toFixed(1)}`);
       if (semanticLocal)
         lines.push(`相对语义簇 mm: dX ${(semanticLocal.x_m * 1000).toFixed(1)}, dY ${(semanticLocal.y_m * 1000).toFixed(1)}, dZ ${(semanticLocal.z_m * 1000).toFixed(1)}`);
-      if (saved) lines.push("状态: 已保存");
+      if (selectedTarget)
+        lines.push(targetSaved || saved ? "状态: 已保存" : "状态: 有未保存修改");
       $("analysis").textContent = lines.length ? lines.join("\n") : "尚未分析或点选";
     }
 
@@ -947,6 +957,7 @@
         return;
       }
       selectedTarget = data.point_camera_m;
+      focusOrbitOn(selectedTarget);
       selectedPixel = data.used_pixel;
       selectionSource = "rgb";
       targetSaved = false;
@@ -1015,6 +1026,7 @@
         return;
       }
       selectedTarget = best;
+      focusOrbitOn(selectedTarget);
       selectedPixel = null;
       selectionSource = "pointcloud";
       targetSaved = false;
@@ -1102,6 +1114,8 @@
         return true;
       }
       selectedTarget = next;
+      focusOrbitOn(selectedTarget);
+      targetSaved = false;
       targetAdjustment = targetAdjustment.map(
         (value, index) => value + cameraDelta[index]
       );
@@ -1194,6 +1208,12 @@
       }
       if (event.code === "KeyX") {
         if (!event.repeat) toggleCalibrationMode();
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "KeyC") {
+        if (!event.repeat)
+          saveCurrentAnnotation().catch(error => setStatus(error.message, true));
         event.preventDefault();
         return;
       }

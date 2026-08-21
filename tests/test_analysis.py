@@ -190,9 +190,26 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(applied["center_camera_m"], plane["center_camera_m"])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            path = save_wall_calibration(root, calibration)
-            self.assertEqual(path.name, "wall_coordinate_calibration.json")
-            self.assertEqual(load_wall_calibration(root), calibration)
+            session = DatasetSession(root, "calibration", camera_metadata())
+            frame_id = session.enqueue(make_frame(1), "manual")
+            other_frame_id = session.enqueue(make_frame(2), "manual")
+            session.close()
+            path = save_wall_calibration(
+                root, session.session_id, frame_id, calibration
+            )
+            self.assertEqual(path.name, f"{frame_id}.json")
+            self.assertEqual(
+                path.parent.parent.name, "wall_coordinate_calibrations"
+            )
+            self.assertEqual(
+                load_wall_calibration(root, session.session_id, frame_id),
+                calibration,
+            )
+            self.assertIsNone(
+                load_wall_calibration(
+                    root, session.session_id, other_frame_id
+                )
+            )
 
     def test_wall_calibration_rejects_short_x_baseline(self) -> None:
         plane = {

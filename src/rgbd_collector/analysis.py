@@ -144,7 +144,7 @@ def analyze_frame(
         cloud["xyz"], threshold_m=plane_threshold_m
     )
     if use_saved_wall_calibration:
-        calibration = load_wall_calibration(data_root)
+        calibration = load_wall_calibration(data_root, session_id, frame_id)
         if calibration is not None:
             plane = apply_wall_calibration(plane, calibration)
     clusters = semantic_clusters(
@@ -329,12 +329,25 @@ def build_wall_calibration(
     }
 
 
-def _wall_calibration_path(data_root: Path) -> Path:
-    return data_root.expanduser().resolve() / "wall_coordinate_calibration.json"
+def _wall_calibration_path(
+    data_root: Path, session_id: str, frame_id: str
+) -> Path:
+    root = data_root.expanduser().resolve()
+    _, frame_dir = resolve_frame_paths(root, session_id, frame_id)
+    if not frame_dir.is_dir():
+        raise FileNotFoundError(f"帧不存在: {frame_id}")
+    return (
+        root
+        / "wall_coordinate_calibrations"
+        / session_id
+        / f"{frame_id}.json"
+    )
 
 
-def load_wall_calibration(data_root: Path) -> dict[str, Any] | None:
-    path = _wall_calibration_path(data_root)
+def load_wall_calibration(
+    data_root: Path, session_id: str, frame_id: str
+) -> dict[str, Any] | None:
+    path = _wall_calibration_path(data_root, session_id, frame_id)
     if not path.exists():
         return None
     calibration = json.loads(path.read_text(encoding="utf-8"))
@@ -368,16 +381,19 @@ def load_wall_calibration(data_root: Path) -> dict[str, Any] | None:
 
 
 def save_wall_calibration(
-    data_root: Path, calibration: dict[str, Any]
+    data_root: Path,
+    session_id: str,
+    frame_id: str,
+    calibration: dict[str, Any],
 ) -> Path:
     root = data_root.expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    path = _wall_calibration_path(root)
+    path = _wall_calibration_path(root, session_id, frame_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         calibration, ensure_ascii=False, indent=2, sort_keys=True
     ) + "\n"
     fd, temp_name = tempfile.mkstemp(
-        prefix=".wall-coordinate-", suffix=".json", dir=root
+        prefix=".wall-coordinate-", suffix=".json", dir=path.parent
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

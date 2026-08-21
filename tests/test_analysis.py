@@ -14,6 +14,7 @@ from rgbd_collector.analysis import (
     load_wall_calibration,
     save_annotation,
     save_wall_calibration,
+    segment_dominant_planes,
     semantic_clusters,
     target_plane_coordinates,
 )
@@ -78,6 +79,56 @@ class AnalysisTests(unittest.TestCase):
         fitted_origin = np.asarray(fitted["origin_camera_m"])
         self.assertAlmostEqual(float(fitted_origin @ wall_x), 0.0, places=8)
         self.assertAlmostEqual(float(fitted_origin @ wall_z), 0.0, places=8)
+
+    def test_multi_plane_segmentation_finds_only_large_planes(self) -> None:
+        rng = np.random.default_rng(12)
+        count = 2_500
+        wall = np.column_stack(
+            (
+                rng.uniform(-0.6, 0.6, count),
+                rng.uniform(-0.5, 0.5, count),
+                1.2 + rng.normal(0.0, 0.001, count),
+            )
+        )
+        side = np.column_stack(
+            (
+                0.65 + rng.normal(0.0, 0.001, count),
+                rng.uniform(-0.5, 0.5, count),
+                rng.uniform(0.5, 1.8, count),
+            )
+        )
+        tiny = np.column_stack(
+            (
+                rng.uniform(-0.2, 0.2, 180),
+                -0.4 + rng.normal(0.0, 0.001, 180),
+                rng.uniform(0.7, 1.5, 180),
+            )
+        )
+        outliers = rng.uniform(
+            [-0.8, -0.7, 0.4], [0.8, 0.7, 2.0], size=(300, 3)
+        )
+        labels, planes = segment_dominant_planes(
+            np.vstack((wall, side, tiny, outliers)),
+            threshold_m=0.005,
+            iterations=120,
+            max_planes=4,
+            min_inlier_ratio=0.05,
+            min_inlier_count=500,
+            seed=3,
+        )
+
+        self.assertEqual(len(planes), 2)
+        wall_labels = labels[:count]
+        side_labels = labels[count : count * 2]
+        wall_label = int(np.bincount(wall_labels[wall_labels >= 0]).argmax())
+        side_label = int(np.bincount(side_labels[side_labels >= 0]).argmax())
+        self.assertNotEqual(wall_label, side_label)
+        self.assertGreater(int(np.count_nonzero(wall_labels == wall_label)), 2400)
+        self.assertGreater(int(np.count_nonzero(side_labels == side_label)), 2400)
+        self.assertGreater(
+            int(np.count_nonzero(labels[count * 2 : count * 2 + 180] == -1)),
+            160,
+        )
 
     def test_annotation_is_replaced_per_frame(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -14,9 +14,11 @@ from .analysis import (
     load_wall_calibration,
     save_annotation,
     save_wall_calibration,
+    segment_dominant_planes,
 )
 from .offline_yolo import OfflineYolo
 from .pointcloud import (
+    apply_plane_segment_colors,
     encode_point_cloud,
     frame_summaries,
     pixel_to_point,
@@ -114,10 +116,12 @@ def create_pointcloud_app(
         max_depth_m: float = Query(default=5.0, gt=0.0, le=100.0),
         max_points: int = Query(default=200_000, ge=1_000, le=1_000_000),
         semantic: bool = Query(default=False),
+        planes: bool = Query(default=False),
+        plane_threshold_m: float = Query(default=0.008, ge=0.001, le=0.05),
     ):
         try:
             boxes = None
-            if semantic:
+            if semantic and not planes:
                 boxes = detector.infer_frame(root, session_id, frame_id)
             points, metadata = reconstruct_frame(
                 root,
@@ -129,6 +133,17 @@ def create_pointcloud_app(
                 max_points=max_points,
                 boxes=boxes,
             )
+            segmented_planes: list[dict] = []
+            if planes:
+                labels, segmented_planes = segment_dominant_planes(
+                    points["xyz"], threshold_m=plane_threshold_m
+                )
+                point_counts = apply_plane_segment_colors(points, labels)
+                metadata["plane_segmentation"] = {
+                    "enabled": True,
+                    "planes": segmented_planes,
+                    "point_counts": point_counts,
+                }
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (ValueError, json.JSONDecodeError) as exc:
@@ -146,6 +161,8 @@ def create_pointcloud_app(
                 "X-Semantic-Enabled": str(
                     metadata["semantic"]["enabled"]
                 ).lower(),
+                "X-Plane-Segmentation-Enabled": str(planes).lower(),
+                "X-Plane-Count": str(len(segmented_planes)),
             },
         )
 

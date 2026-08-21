@@ -202,6 +202,10 @@
         <input id="semantic" type="checkbox">
         YOLO 语义着色（需启动时配置模型）
       </label>
+      <label class="check">
+        <input id="planes" type="checkbox">
+        多平面分割着色（试验）
+      </label>
       <label>柜面 RANSAC 阈值（mm）
         <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
       </label>
@@ -483,6 +487,8 @@
         max_depth_m: $("maxDepth").value,
         max_points: $("maxPoints").value,
         semantic: $("semantic").checked ? "true" : "false",
+        planes: $("planes").checked ? "true" : "false",
+        plane_threshold_m: Number($("planeThreshold").value) / 1000,
       });
       const response = await fetch(
         `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`,
@@ -506,7 +512,10 @@
       center = (response.headers.get("X-Cloud-Center") || "0,0,0").split(",").map(Number);
       radius = Number(response.headers.get("X-Cloud-Radius")) || 1;
       if (!preserveView) resetView();
-      $("hud").textContent = `${pointCount.toLocaleString()} points · stride ${response.headers.get("X-Cloud-Stride")}`;
+      const planeCount = Number(response.headers.get("X-Plane-Count") || 0);
+      const planeDetail = $("planes").checked ? ` · ${planeCount} planes` : "";
+      $("hud").textContent =
+        `${pointCount.toLocaleString()} points · stride ${response.headers.get("X-Cloud-Stride")}${planeDetail}`;
       setStatus(`${pointCount.toLocaleString()} 个点`, false,
         `${session}<br>${frame}<br>包围半径 ${radius.toFixed(3)} m`);
       selectedTarget = null;
@@ -1146,8 +1155,14 @@
       loadCloud().catch(e => setStatus(e.message, true));
     };
     $("loadBtn").onclick = () => loadCloud().catch(e => setStatus(e.message, true));
-    $("semantic").onchange = () =>
+    $("semantic").onchange = () => {
+      if ($("semantic").checked) $("planes").checked = false;
       loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
+    };
+    $("planes").onchange = () => {
+      if ($("planes").checked) $("semantic").checked = false;
+      loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
+    };
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
     $("coordinateBtn").onclick = () => {
       if (!wallAxes(currentAnalysis?.plane)) {

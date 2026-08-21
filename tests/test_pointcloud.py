@@ -8,6 +8,8 @@ import numpy as np
 
 from rgbd_collector.pointcloud import (
     POINT_DTYPE,
+    SEMANTIC_PALETTE,
+    apply_plane_segment_colors,
     detection_pixel_mask,
     encode_point_cloud,
     frame_summaries,
@@ -61,6 +63,22 @@ class PointCloudTests(unittest.TestCase):
             int.from_bytes(encoded[4:8], "little"), points.size
         )
         self.assertEqual(len(encoded), 8 + points.size * 16)
+
+    def test_plane_segments_receive_distinct_colors(self) -> None:
+        points = np.zeros(5, dtype=POINT_DTYPE)
+        points["rgba"][:, 3] = 255
+        counts = apply_plane_segment_colors(
+            points, np.array([0, 0, 1, 1, -1], dtype=np.int32)
+        )
+
+        self.assertEqual(counts, {"0": 2, "1": 2})
+        np.testing.assert_array_equal(
+            points["rgba"][0, :3], SEMANTIC_PALETTE[0]
+        )
+        np.testing.assert_array_equal(
+            points["rgba"][2, :3], SEMANTIC_PALETTE[1]
+        )
+        np.testing.assert_array_equal(points["rgba"][4, :3], [54, 60, 72])
 
     def test_dataset_browser_lists_sessions_and_frames(self) -> None:
         sessions = session_summaries(self.root)

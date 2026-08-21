@@ -120,6 +120,121 @@ def fit_dominant_plane(
     }
 
 
+def segment_dominant_planes(
+    points_xyz: np.ndarray,
+    *,
+    threshold_m: float = 0.008,
+    iterations: int = 160,
+    max_planes: int = 6,
+    min_inlier_ratio: float = 0.03,
+    min_inlier_count: int = 800,
+    sample_limit: int = 60_000,
+    seed: int = 0,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    points = np.asarray(points_xyz, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("点云必须是 N×3 数组")
+    if not 0.001 <= threshold_m <= 0.05:
+        raise ValueError("平面阈值必须在 1–50 mm 之间")
+    if not 1 <= max_planes <= 12:
+        raise ValueError("最大平面数量必须在 1–12 之间")
+
+    valid = np.isfinite(points).all(axis=1)
+    labels = np.full(points.shape[0], -1, dtype=np.int32)
+    valid_count = int(valid.sum())
+    required_count = max(
+        min_inlier_count, int(np.ceil(valid_count * min_inlier_ratio))
+    )
+    if valid_count < max(3, required_count):
+        return labels, []
+
+    rng = np.random.default_rng(seed)
+    planes: list[dict[str, Any]] = []
+    remaining = valid.copy()
+    for plane_index in range(max_planes):
+        remaining_indices = np.flatnonzero(remaining)
+        if remaining_indices.size < required_count:
+            break
+        if remaining_indices.size > sample_limit:
+            sample_indices = rng.choice(
+                remaining_indices, sample_limit, replace=False
+            )
+        else:
+            sample_indices = remaining_indices
+        sample = points[sample_indices]
+
+        best_mask: np.ndarray | None = None
+        best_count = 0
+        for _ in range(iterations):
+            triangle = sample[rng.choice(sample.shape[0], 3, replace=False)]
+            normal = np.cross(
+                triangle[1] - triangle[0], triangle[2] - triangle[0]
+            )
+            length = np.linalg.norm(normal)
+            if length < 1e-8:
+                continue
+            normal /= length
+            mask = np.abs((sample - triangle[0]) @ normal) <= threshold_m
+            count = int(mask.sum())
+            if count > best_count:
+                best_count = count
+                best_mask = mask
+        if best_mask is None or best_count < 3:
+            break
+
+        fitting_inliers = sample[best_mask]
+        origin = fitting_inliers.mean(axis=0)
+        _, _, vh = np.linalg.svd(
+            fitting_inliers - origin, full_matrices=False
+        )
+        normal = vh[-1]
+        normal /= np.linalg.norm(normal)
+
+        candidate_points = points[remaining_indices]
+        candidate_mask = (
+            np.abs((candidate_points - origin) @ normal) <= threshold_m
+        )
+        if int(candidate_mask.sum()) < required_count:
+            break
+
+        full_inliers = candidate_points[candidate_mask]
+        if full_inliers.shape[0] > sample_limit:
+            refinement = full_inliers[
+                rng.choice(full_inliers.shape[0], sample_limit, replace=False)
+            ]
+        else:
+            refinement = full_inliers
+        origin = refinement.mean(axis=0)
+        _, _, vh = np.linalg.svd(refinement - origin, full_matrices=False)
+        normal = vh[-1]
+        normal /= np.linalg.norm(normal)
+        if np.dot(normal, origin) < 0:
+            normal = -normal
+
+        distances = np.abs((candidate_points - origin) @ normal)
+        candidate_mask = distances <= threshold_m
+        inlier_count = int(candidate_mask.sum())
+        if inlier_count < required_count:
+            break
+
+        selected_indices = remaining_indices[candidate_mask]
+        labels[selected_indices] = plane_index
+        remaining[selected_indices] = False
+        planes.append(
+            {
+                "index": plane_index,
+                "origin_camera_m": origin.tolist(),
+                "normal_camera": normal.tolist(),
+                "inlier_count": inlier_count,
+                "inlier_ratio": float(inlier_count / valid_count),
+                "rms_m": float(
+                    np.sqrt(np.mean(distances[candidate_mask] ** 2))
+                ),
+            }
+        )
+    return labels, planes
+
+
 def analyze_frame(
     data_root: Path,
     session_id: str,

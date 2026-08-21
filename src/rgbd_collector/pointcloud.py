@@ -31,6 +31,23 @@ SEMANTIC_PALETTE = np.array(
 )
 
 
+def apply_plane_segment_colors(
+    points: np.ndarray, labels: np.ndarray
+) -> dict[str, int]:
+    label_values = np.asarray(labels, dtype=np.int32)
+    if points.dtype != POINT_DTYPE or label_values.shape != (points.size,):
+        raise ValueError("平面标签必须与点云数量一致")
+    points["rgba"][:, :3] = np.array([54, 60, 72], dtype=np.uint8)
+    counts: dict[str, int] = {}
+    for label in np.unique(label_values[label_values >= 0]):
+        mask = label_values == label
+        points["rgba"][mask, :3] = SEMANTIC_PALETTE[
+            int(label) % len(SEMANTIC_PALETTE)
+        ]
+        counts[str(int(label))] = int(mask.sum())
+    return counts
+
+
 def detection_pixel_mask(
     u: np.ndarray,
     v: np.ndarray,

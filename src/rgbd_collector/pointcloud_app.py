@@ -22,8 +22,11 @@ from .analysis import (
     save_camera_plane_pose_measurements,
     save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
+    save_yolo_panel_center_measurements,
     segment_dominant_planes,
     split_plane_labels_by_connectivity,
+    summarize_panel_center_target_relationships,
+    target_plane_coordinates,
 )
 from .offline_yolo import OfflineYolo
 from .pointcloud import (
@@ -134,6 +137,187 @@ def create_pointcloud_app(
             "frame_count": payload["frame_count"],
             "success_count": payload["success_count"],
             "failure_count": payload["failure_count"],
+            "elapsed_s": time.perf_counter() - started,
+        }
+
+    @app.post("/api/yolo-panel-center/{session_id}/save-all")
+    def save_all_yolo_panel_centers(
+        session_id: str,
+        body: dict | None = None,
+    ):
+        requested = body or {}
+        options = {
+            "plane_threshold_m": float(
+                requested.get("plane_threshold_m", 0.008)
+            ),
+            "min_depth_m": float(requested.get("min_depth_m", 0.1)),
+            "max_depth_m": float(requested.get("max_depth_m", 5.0)),
+            "stride": int(requested.get("stride", 1)),
+            "max_points": int(requested.get("max_points", 1_000_000)),
+            "plane_analysis_max_points": int(
+                requested.get("plane_analysis_max_points", 200_000)
+            ),
+            "min_plane_points": int(
+                requested.get("min_plane_points", 300)
+            ),
+        }
+        started = time.perf_counter()
+        try:
+            frames = frame_summaries(root, session_id)
+            measurements: list[dict] = []
+            skipped_uncalibrated_count = 0
+            for frame in frames:
+                frame_id = str(frame["id"])
+                try:
+                    calibration = load_wall_calibration(
+                        root, session_id, frame_id
+                    )
+                    if calibration is None:
+                        skipped_uncalibrated_count += 1
+                        continue
+                    boxes = (
+                        detector.infer_frame(root, session_id, frame_id)
+                        if detector.enabled
+                        else None
+                    )
+                    analysis = analyze_frame(
+                        root,
+                        session_id,
+                        frame_id,
+                        boxes=boxes,
+                        include_yolo_panel_fit=True,
+                        **options,
+                    )
+                    panel = analysis["yolo_panel_fit"]
+                    if not panel.get("available"):
+                        measurements.append(
+                            {
+                                "ok": False,
+                                "session_id": session_id,
+                                "frame_id": frame_id,
+                                "error": str(
+                                    panel.get("reason")
+                                    or "面板拟合不可用"
+                                ),
+                                "detection": panel.get("detection"),
+                                "mask_point_count": panel.get(
+                                    "mask_point_count"
+                                ),
+                            }
+                        )
+                        continue
+                    center_camera = panel.get(
+                        "rectangle_center_camera_m"
+                    )
+                    if center_camera is None:
+                        corners = panel.get(
+                            "rectangle_corners_camera_m"
+                        )
+                        if not isinstance(corners, list) or len(corners) != 4:
+                            raise ValueError("面板矩形中心无效")
+                        center_camera = [
+                            sum(float(corner[axis]) for corner in corners) / 4
+                            for axis in range(3)
+                        ]
+                    center_wall_named = target_plane_coordinates(
+                        center_camera, analysis["plane"]
+                    )
+                    measurements.append(
+                        {
+                            "ok": True,
+                            "session_id": session_id,
+                            "frame_id": frame_id,
+                            "rectangle_center_camera_m": center_camera,
+                            "rectangle_center_wall_m": [
+                                center_wall_named["x_m"],
+                                center_wall_named["y_m"],
+                                center_wall_named["z_m"],
+                            ],
+                            "rectangle_center_wall_named_m": (
+                                center_wall_named
+                            ),
+                            "rectangle_corners_camera_m": panel[
+                                "rectangle_corners_camera_m"
+                            ],
+                            "detection": panel.get("detection"),
+                            "panel_normal_camera": panel.get(
+                                "normal_camera"
+                            ),
+                            "long_axis_camera": panel.get(
+                                "long_axis_camera"
+                            ),
+                            "short_axis_camera": panel.get(
+                                "short_axis_camera"
+                            ),
+                            "long_length_m": panel.get("long_length_m"),
+                            "short_length_m": panel.get("short_length_m"),
+                            "panel_rms_m": panel.get("rms_m"),
+                            "panel_inlier_count": panel.get(
+                                "inlier_count"
+                            ),
+                            "panel_inlier_ratio": panel.get(
+                                "inlier_ratio"
+                            ),
+                            "orientation_source": panel.get(
+                                "orientation_source"
+                            ),
+                            "wall_coordinate_calibrated": bool(
+                                analysis["plane"].get("calibrated")
+                            ),
+                        }
+                    )
+                except (
+                    FileNotFoundError,
+                    TypeError,
+                    ValueError,
+                    RuntimeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    measurements.append(
+                        {
+                            "ok": False,
+                            "session_id": session_id,
+                            "frame_id": frame_id,
+                            "error": str(exc),
+                        }
+                    )
+            target_relationships = (
+                summarize_panel_center_target_relationships(
+                    measurements,
+                    load_annotations(root, session_id),
+                )
+            )
+            path, payload = save_yolo_panel_center_measurements(
+                root,
+                session_id,
+                measurements,
+                options=options,
+                total_session_frame_count=len(frames),
+                skipped_uncalibrated_count=(
+                    skipped_uncalibrated_count
+                ),
+                target_relationships=target_relationships,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "path": str(path.relative_to(root)),
+            "frame_count": payload["frame_count"],
+            "total_session_frame_count": payload[
+                "total_session_frame_count"
+            ],
+            "skipped_uncalibrated_count": payload[
+                "skipped_uncalibrated_count"
+            ],
+            "success_count": payload["success_count"],
+            "failure_count": payload["failure_count"],
+            "target_relationships": payload["target_relationships"][
+                "models"
+            ],
             "elapsed_s": time.perf_counter() - started,
         }
 

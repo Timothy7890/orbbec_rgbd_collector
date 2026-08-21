@@ -28,9 +28,11 @@ from rgbd_collector.analysis import (
     save_camera_plane_pose_measurements,
     save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
+    save_yolo_panel_center_measurements,
     segment_dominant_planes,
     semantic_clusters,
     split_plane_labels_by_connectivity,
+    summarize_panel_center_target_relationships,
     target_plane_coordinates,
 )
 from rgbd_collector.storage import DatasetSession
@@ -93,6 +95,104 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(payload["failure_count"], 1)
         self.assertEqual(saved["schema"], "rgbd-camera-plane-pose/v1")
         self.assertEqual(saved["frame_count"], 2)
+
+    def test_yolo_panel_center_batch_payload_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "panel-center", camera_metadata())
+            session.close()
+            path, payload = save_yolo_panel_center_measurements(
+                root,
+                session.session_id,
+                [
+                    {
+                        "ok": True,
+                        "frame_id": "frame-1",
+                        "rectangle_center_camera_m": [0.1, -0.2, 0.8],
+                        "rectangle_center_wall_m": [0.03, -0.01, 0.04],
+                    },
+                    {
+                        "ok": False,
+                        "frame_id": "frame-2",
+                        "error": "panel fit failed",
+                    },
+                ],
+                options={"stride": 1, "max_points": 1_000_000},
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["success_count"], 1)
+        self.assertEqual(payload["failure_count"], 1)
+        self.assertEqual(saved["schema"], "rgbd-yolo-panel-center/v1")
+        self.assertEqual(saved["frame_count"], 2)
+        self.assertEqual(saved["skipped_uncalibrated_count"], 0)
+        self.assertEqual(
+            saved["frames"][0]["rectangle_center_camera_m"],
+            [0.1, -0.2, 0.8],
+        )
+
+    def test_panel_center_target_relationships_fit_fixed_offsets(
+        self,
+    ) -> None:
+        def saved_point(x: float, y: float, z: float) -> dict:
+            return {
+                "target_plane_coordinates_m": {
+                    "x_m": x,
+                    "y_m": y,
+                    "z_m": z,
+                }
+            }
+
+        relationships = summarize_panel_center_target_relationships(
+            [
+                {
+                    "ok": True,
+                    "frame_id": "f1",
+                    "rectangle_center_wall_m": [0.0, 0.0, 0.0],
+                },
+                {
+                    "ok": True,
+                    "frame_id": "f2",
+                    "rectangle_center_wall_m": [1.0, 1.0, 1.0],
+                },
+                {
+                    "ok": False,
+                    "frame_id": "f3",
+                    "error": "fit failed",
+                },
+            ],
+            [
+                {
+                    "frame_id": "f1",
+                    "points": {
+                        "1": saved_point(0.1, 0.2, 0.3),
+                        "2": saved_point(0.4, 0.5, 0.6),
+                    },
+                },
+                {
+                    "frame_id": "f2",
+                    "points": {
+                        "1": saved_point(1.1, 1.2, 1.3),
+                        "2": saved_point(1.4, 1.5, 1.6),
+                    },
+                },
+            ],
+        )
+
+        point1 = relationships["models"]["point1_from_panel_center"]
+        point2 = relationships["models"]["point2_from_panel_center"]
+        point1_to_point2 = relationships["models"]["point2_from_point1"]
+        self.assertEqual(point1["count"], 2)
+        np.testing.assert_allclose(
+            point1["mean_offset_wall_m"], [0.1, 0.2, 0.3]
+        )
+        np.testing.assert_allclose(
+            point2["mean_offset_wall_m"], [0.4, 0.5, 0.6]
+        )
+        np.testing.assert_allclose(
+            point1_to_point2["mean_offset_wall_m"], [0.3, 0.3, 0.3]
+        )
+        self.assertAlmostEqual(point1["leave_one_out_rmse_3d_m"], 0.0)
 
     def test_ransac_finds_plane_with_outliers(self) -> None:
         rng = np.random.default_rng(4)
@@ -1011,6 +1111,11 @@ class AnalysisTests(unittest.TestCase):
             fitted["edges"][0]["start_camera_m"],
             fitted["edges"][1]["start_camera_m"],
             atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            fitted["rectangle_center_camera_m"],
+            np.mean(fitted["rectangle_corners_camera_m"], axis=0),
+            atol=1e-12,
         )
         self.assertAlmostEqual(
             abs(float(np.asarray(fitted["normal_camera"]) @ [0, 0, 1])),

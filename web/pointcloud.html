@@ -299,6 +299,9 @@
       <button id="saveAllCameraPlanePosesBtn" class="secondary">
         一键计算并保存全部帧朝向与距离
       </button>
+      <button id="saveAllYoloPanelCentersBtn" class="secondary" disabled>
+        保存已有坐标系帧的面板中心
+      </button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
       <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系（V）</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
@@ -628,6 +631,8 @@
         : "启动 run-pointcloud.sh 时传入 --model 才能启用";
       $("yoloPanelFit").disabled = !status.yolo.enabled;
       $("yoloPanelFit").title = $("semantic").title;
+      $("saveAllYoloPanelCentersBtn").disabled =
+        !status.yolo.enabled;
       const data = await json("/api/sessions");
       $("session").innerHTML = (data.sessions || []).map(item =>
         `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.frame_count} 帧</option>`
@@ -1098,6 +1103,52 @@
       }
     }
 
+    async function saveAllYoloPanelCenters() {
+      const session = $("session").value;
+      if (!session) throw new Error("请先选择会话");
+      const button = $("saveAllYoloPanelCentersBtn");
+      button.disabled = true;
+      button.textContent = "正在计算已有坐标系帧，请稍候…";
+      setStatus(
+        "正在计算并保存已有坐标系帧的面板中心…",
+        false,
+        "没有保存坐标系的帧会直接跳过"
+      );
+      try {
+        const data = await json(
+          `/api/yolo-panel-center/${encodeURIComponent(session)}/save-all`,
+          {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(analysisOptions()),
+          }
+        );
+        const models = data.target_relationships || {};
+        const relationshipText = [
+          ["point1_from_panel_center", "点1"],
+          ["point2_from_panel_center", "点2"],
+        ].map(([key, label]) => {
+          const model = models[key];
+          if (!model?.count) return `${label} 无共同成功帧`;
+          const rmse = Number(
+            model.leave_one_out_rmse_3d_m ?? model.fit_rmse_3d_m
+          ) * 1000;
+          return `${label} ${model.count}帧固定偏移 RMSE ${rmse.toFixed(1)} mm`;
+        }).join(" · ");
+        setStatus(
+          "全部帧面板中心已保存",
+          data.failure_count > 0,
+          `有坐标系 ${data.frame_count}/${data.total_session_frame_count} 帧，` +
+          `跳过 ${data.skipped_uncalibrated_count} 帧 · ` +
+          `拟合成功 ${data.success_count}，失败 ${data.failure_count} · ` +
+          `${relationshipText} · ${data.elapsed_s.toFixed(1)} 秒 · ${data.path}`
+        );
+      } finally {
+        button.disabled = $("yoloPanelFit").disabled;
+        button.textContent = "保存已有坐标系帧的面板中心";
+      }
+    }
+
     function syncCoordinateFrameButton() {
       const available = Boolean(wallAxes(currentAnalysis?.plane));
       $("coordinateBtn").disabled = !available;
@@ -1394,10 +1445,14 @@
         );
         centerDot.classList.add("panel-center");
         centerDot.setAttribute("r", 6);
-        const center = [0, 1, 2].map(
-          axis =>
-            corners.reduce((sum, corner) => sum + corner[axis], 0) / 4
-        );
+        const center = Array.isArray(panel.rectangle_center_camera_m)
+          ? panel.rectangle_center_camera_m
+          : [0, 1, 2].map(
+              axis =>
+                corners.reduce(
+                  (sum, corner) => sum + corner[axis], 0
+                ) / 4
+            );
         overlay.appendChild(polygon);
         overlay.appendChild(centerDot);
         yoloPanelPlaneOverlay = {corners, polygon, center, centerDot};
@@ -1581,6 +1636,12 @@
               .toLocaleString()} 点 · ` +
             `剔除 ${panel.excluded_point_count.toLocaleString()} 点`
           );
+          const panelCenter = panel.rectangle_center_camera_m;
+          if (Array.isArray(panelCenter))
+            lines.push(
+              `面板中心相机系 m: ` +
+              panelCenter.map(value => Number(value).toFixed(5)).join(", ")
+            );
         } else if (panel) {
           lines.push(`YOLO 面板拟合: 不可用 · ${panel.reason}`);
         } else {
@@ -2028,6 +2089,8 @@
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
     $("saveAllCameraPlanePosesBtn").onclick = () =>
       saveAllCameraPlanePoses().catch(e => setStatus(e.message, true));
+    $("saveAllYoloPanelCentersBtn").onclick = () =>
+      saveAllYoloPanelCenters().catch(e => setStatus(e.message, true));
     $("targetFinderBtn").onclick = () =>
       findPointOne().catch(e => setStatus(e.message, true));
     $("coordinateBtn").onclick = () => {

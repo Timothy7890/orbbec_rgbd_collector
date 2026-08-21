@@ -266,6 +266,198 @@ def save_camera_plane_pose_measurements(
     return path, payload
 
 
+def save_yolo_panel_center_measurements(
+    data_root: Path,
+    session_id: str,
+    measurements: list[dict[str, Any]],
+    *,
+    options: dict[str, Any],
+    total_session_frame_count: int | None = None,
+    skipped_uncalibrated_count: int = 0,
+    target_relationships: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    root = data_root.expanduser().resolve()
+    session_dir, _ = resolve_frame_paths(root, session_id, "_validate_")
+    if not session_dir.is_dir():
+        raise FileNotFoundError(f"会话不存在: {session_id}")
+    path = session_dir / "yolo_panel_center_measurements.json"
+    payload = {
+        "schema": "rgbd-yolo-panel-center/v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "definition": {
+            "rectangle_center_camera_m": (
+                "arithmetic mean of the four fitted rectangle corners in "
+                "camera coordinates"
+            ),
+            "rectangle_center_wall_m": (
+                "same point expressed in the saved or fitted wall "
+                "coordinate system"
+            ),
+            "camera_coordinates": "x-right-y-down-z-forward",
+            "wall_coordinates": "x-right-y-inward-z-up",
+        },
+        "options": options,
+        "total_session_frame_count": (
+            len(measurements)
+            if total_session_frame_count is None
+            else int(total_session_frame_count)
+        ),
+        "skipped_uncalibrated_count": int(
+            skipped_uncalibrated_count
+        ),
+        "frame_count": len(measurements),
+        "success_count": sum(bool(item.get("ok")) for item in measurements),
+        "failure_count": sum(
+            not bool(item.get("ok")) for item in measurements
+        ),
+        "frames": measurements,
+    }
+    if target_relationships is not None:
+        payload["target_relationships"] = target_relationships
+    encoded = json.dumps(
+        payload, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=".yolo-panel-centers-", suffix=".json", dir=session_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+    return path, payload
+
+
+def summarize_panel_center_target_relationships(
+    measurements: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    annotations_by_frame = {
+        str(item.get("frame_id")): item
+        for item in annotations
+        if item.get("frame_id") is not None
+    }
+    offsets_by_relation: dict[str, list[np.ndarray]] = {
+        "point1_from_panel_center": [],
+        "point2_from_panel_center": [],
+        "point2_from_point1": [],
+    }
+    frame_relationships: list[dict[str, Any]] = []
+
+    def wall_point(point: dict[str, Any] | None) -> np.ndarray | None:
+        if not isinstance(point, dict):
+            return None
+        coordinates = point.get("target_plane_coordinates_m")
+        if not isinstance(coordinates, dict):
+            return None
+        try:
+            value = np.asarray(
+                [
+                    coordinates["x_m"],
+                    coordinates["y_m"],
+                    coordinates["z_m"],
+                ],
+                dtype=np.float64,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if value.shape != (3,) or not np.isfinite(value).all():
+            return None
+        return value
+
+    for measurement in measurements:
+        if not measurement.get("ok"):
+            continue
+        center = np.asarray(
+            measurement.get("rectangle_center_wall_m"),
+            dtype=np.float64,
+        )
+        if center.shape != (3,) or not np.isfinite(center).all():
+            continue
+        frame_id = str(measurement.get("frame_id"))
+        annotation = annotations_by_frame.get(frame_id)
+        if annotation is None:
+            continue
+        points = annotation.get("points")
+        if not isinstance(points, dict):
+            points = {}
+            if annotation.get("target_camera_m") is not None:
+                points["1"] = annotation
+        point1 = wall_point(points.get("1"))
+        point2 = wall_point(points.get("2"))
+        relationships: dict[str, Any] = {"frame_id": frame_id}
+        if point1 is not None:
+            offset = point1 - center
+            offsets_by_relation["point1_from_panel_center"].append(offset)
+            relationships["point1_minus_panel_center_wall_m"] = (
+                offset.tolist()
+            )
+        if point2 is not None:
+            offset = point2 - center
+            offsets_by_relation["point2_from_panel_center"].append(offset)
+            relationships["point2_minus_panel_center_wall_m"] = (
+                offset.tolist()
+            )
+        if point1 is not None and point2 is not None:
+            offset = point2 - point1
+            offsets_by_relation["point2_from_point1"].append(offset)
+            relationships["point2_minus_point1_wall_m"] = offset.tolist()
+        if len(relationships) > 1:
+            frame_relationships.append(relationships)
+
+    def summarize(offsets: list[np.ndarray]) -> dict[str, Any]:
+        if not offsets:
+            return {"count": 0}
+        values = np.asarray(offsets, dtype=np.float64)
+        mean = values.mean(axis=0)
+        residuals = values - mean
+        summary: dict[str, Any] = {
+            "count": int(values.shape[0]),
+            "mean_offset_wall_m": mean.tolist(),
+            "std_offset_wall_m": values.std(axis=0).tolist(),
+            "fit_rmse_wall_m": np.sqrt(
+                np.mean(residuals**2, axis=0)
+            ).tolist(),
+            "fit_rmse_3d_m": float(
+                np.sqrt(np.mean(np.sum(residuals**2, axis=1)))
+            ),
+            "max_residual_3d_m": float(
+                np.max(np.linalg.norm(residuals, axis=1))
+            ),
+        }
+        if values.shape[0] >= 2:
+            total = values.sum(axis=0)
+            leave_one_out_mean = (
+                total[None, :] - values
+            ) / (values.shape[0] - 1)
+            leave_one_out_residuals = values - leave_one_out_mean
+            summary["leave_one_out_rmse_3d_m"] = float(
+                np.sqrt(
+                    np.mean(
+                        np.sum(leave_one_out_residuals**2, axis=1)
+                    )
+                )
+            )
+        return summary
+
+    return {
+        "definition": (
+            "fixed wall-coordinate offsets and residuals; lower RMSE means "
+            "the pink panel center predicts the saved target more stably"
+        ),
+        "models": {
+            name: summarize(offsets)
+            for name, offsets in offsets_by_relation.items()
+        },
+        "frames": frame_relationships,
+    }
+
+
 def segment_dominant_planes(
     points_xyz: np.ndarray,
     *,
@@ -1618,6 +1810,7 @@ def fit_yolo_panel_rectangle(
         camera_point(long_max, short_max),
         camera_point(long_min, short_max),
     ]
+    rectangle_center = np.mean(rectangle_corners, axis=0)
     long_axis_camera = planar_basis @ long_axis_2d
     short_axis_camera = planar_basis @ short_axis_2d
     long_axis_camera /= np.linalg.norm(long_axis_camera)
@@ -1642,6 +1835,7 @@ def fit_yolo_panel_rectangle(
         "rectangle_corners_camera_m": [
             corner_point.tolist() for corner_point in rectangle_corners
         ],
+        "rectangle_center_camera_m": rectangle_center.tolist(),
         "long_axis_camera": long_axis_camera.tolist(),
         "short_axis_camera": short_axis_camera.tolist(),
         "long_length_m": long_length,

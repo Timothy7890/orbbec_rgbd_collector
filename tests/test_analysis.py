@@ -9,6 +9,7 @@ import numpy as np
 
 from rgbd_collector.analysis import (
     analyze_frame,
+    analyze_yolo_mask_panel,
     apply_wall_calibration,
     build_accepted_wall_calibration,
     build_wall_calibration,
@@ -19,6 +20,7 @@ from rgbd_collector.analysis import (
     estimate_wall_x_from_plane_intersections,
     estimate_wall_x_from_secondary_plane_shape,
     fit_dominant_plane,
+    fit_yolo_panel_rectangle,
     highest_confidence_semantic_pointcloud,
     load_annotations,
     load_wall_calibration,
@@ -939,10 +941,147 @@ class AnalysisTests(unittest.TestCase):
                 frame_id,
                 min_plane_points=3,
             )
+            panel_enabled_result = analyze_frame(
+                root,
+                session.session_id,
+                frame_id,
+                min_plane_points=3,
+                include_yolo_panel_fit=True,
+            )
 
         self.assertTrue(result["plane"]["plane_analysis_skipped"])
         self.assertEqual(result["plane_segments"], [])
         self.assertEqual(result["plane"]["inlier_count"], 42)
+        self.assertNotIn("yolo_panel_fit", result)
+        self.assertFalse(panel_enabled_result["yolo_panel_fit"]["available"])
+        self.assertIn(
+            "没有 YOLO", panel_enabled_result["yolo_panel_fit"]["reason"]
+        )
+
+    def test_yolo_panel_rectangle_rejects_knob_and_handles_occlusion(
+        self,
+    ) -> None:
+        rng = np.random.default_rng(7)
+        long_positions = rng.uniform(-0.14, 0.14, 18_000)
+        short_positions = rng.uniform(-0.10, 0.10, 18_000)
+        visible = ~(
+            (long_positions > 0.03) & (short_positions < -0.01)
+        )
+        long_positions = long_positions[visible]
+        short_positions = short_positions[visible]
+        angle = np.radians(17.0)
+        panel = np.column_stack(
+            (
+                long_positions * np.cos(angle)
+                - short_positions * np.sin(angle),
+                long_positions * np.sin(angle)
+                + short_positions * np.cos(angle),
+                0.8
+                + rng.normal(0.0, 0.0012, long_positions.shape[0]),
+            )
+        )
+        knob = np.column_stack(
+            (
+                rng.normal(-0.03, 0.025, 2_500),
+                rng.normal(0.02, 0.025, 2_500),
+                rng.normal(0.72, 0.008, 2_500),
+            )
+        )
+        outliers = rng.uniform(
+            [-0.18, -0.14, 0.65],
+            [0.18, 0.14, 0.95],
+            size=(500, 3),
+        )
+
+        fitted = fit_yolo_panel_rectangle(
+            np.vstack((panel, knob, outliers))
+        )
+
+        self.assertTrue(fitted["available"])
+        self.assertAlmostEqual(fitted["long_length_m"], 0.28, delta=0.015)
+        self.assertAlmostEqual(
+            fitted["short_length_m"], 0.20, delta=0.015
+        )
+        self.assertGreater(fitted["excluded_point_count"], 2_500)
+        self.assertEqual(
+            [edge["role"] for edge in fitted["edges"]],
+            ["long", "short"],
+        )
+        np.testing.assert_allclose(
+            fitted["edges"][0]["start_camera_m"],
+            fitted["edges"][1]["start_camera_m"],
+            atol=1e-9,
+        )
+        self.assertAlmostEqual(
+            abs(float(np.asarray(fitted["normal_camera"]) @ [0, 0, 1])),
+            1.0,
+            delta=0.01,
+        )
+
+    def test_yolo_panel_uses_highest_confidence_polygon(self) -> None:
+        x_values, y_values = np.meshgrid(
+            np.linspace(-0.12, 0.12, 100),
+            np.linspace(-0.08, 0.08, 70),
+        )
+        panel = np.column_stack(
+            (
+                x_values.ravel(),
+                y_values.ravel(),
+                np.full(x_values.size, 0.8),
+            )
+        )
+        pixels = np.column_stack(
+            (
+                100 + (x_values.ravel() + 0.12) * 400,
+                100 + (y_values.ravel() + 0.08) * 400,
+            )
+        )
+        boxes = [
+            {
+                "cls": 3,
+                "name": "lower",
+                "conf": 0.4,
+                "xyxy": [0, 0, 10, 10],
+            },
+            {
+                "cls": 4,
+                "name": "panel",
+                "conf": 0.95,
+                "xyxy": [95, 95, 205, 170],
+                "polygon": [
+                    [95, 95],
+                    [205, 95],
+                    [205, 170],
+                    [95, 170],
+                ],
+            },
+        ]
+
+        fitted = analyze_yolo_mask_panel(
+            panel, pixels, boxes, [300, 300]
+        )
+
+        self.assertTrue(fitted["available"])
+        self.assertEqual(fitted["detection"]["box_index"], 1)
+        self.assertEqual(fitted["detection"]["name"], "panel")
+        self.assertTrue(fitted["detection"]["used_polygon_mask"])
+        self.assertGreater(fitted["mask_point_count"], 6_000)
+
+    def test_yolo_panel_reports_too_few_mask_points(self) -> None:
+        result = analyze_yolo_mask_panel(
+            np.zeros((20, 3)),
+            np.column_stack((np.arange(20), np.arange(20))),
+            [
+                {
+                    "name": "panel",
+                    "conf": 0.9,
+                    "xyxy": [0, 0, 30, 30],
+                }
+            ],
+            [40, 40],
+        )
+        self.assertFalse(result["available"])
+        self.assertIn("有效点不足", result["reason"])
 
     def test_semantic_cluster_prefers_points_in_front_of_plane(self) -> None:
         plane = {

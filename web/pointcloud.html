@@ -145,6 +145,14 @@
     }
     .plane-axes-overlay .plane-boundary-label { font-size: 13px; }
     .plane-axes-overlay .plane-center-label { font-size: 20px; }
+    .yolo-panel-overlay { z-index: 4; }
+    .yolo-panel-overlay .panel-edge {
+      stroke-width: 7; opacity: .98;
+    }
+    .yolo-panel-overlay .panel-edge.long { stroke: #ffe45c; }
+    .yolo-panel-overlay .panel-edge.short { stroke: #ff8a65; }
+    .yolo-panel-overlay .panel-edge-label.long { fill: #ffe45c; }
+    .yolo-panel-overlay .panel-edge-label.short { fill: #ff8a65; }
     .calibration-marker {
       position: absolute; z-index: 5; width: 22px; height: 22px;
       border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%);
@@ -248,6 +256,10 @@
         YOLO 语义着色（需启动时配置模型）
       </label>
       <label class="check">
+        <input id="yoloPanelFit" type="checkbox">
+        YOLO Mask 内面板拟合 + 长短边（试验）
+      </label>
+      <label class="check">
         <input id="planes" type="checkbox">
         多平面分割着色 + 边界线（调试）
       </label>
@@ -290,7 +302,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。点击“算法找点1”或按 Tab，会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。勾选“YOLO Mask 内面板拟合”后，才会对最高置信度实例额外拟合局部平面，并显示一条完整长边和一条相邻短边；关闭时不会执行该算法。点击“算法找点1”或按 Tab，会根据所选版本从最高置信度 YOLO 点云生成点1初值，之后仍可使用 A/D/S/W/Q/E 微调。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -319,6 +331,7 @@
         <text id="axisLabelZ" fill="#4d8eff">Z</text>
       </svg>
       <svg id="planeAxesOverlay" class="coordinate-frame plane-axes-overlay" hidden></svg>
+      <svg id="yoloPanelOverlay" class="coordinate-frame yolo-panel-overlay" hidden></svg>
       <div id="calibrationOriginMarker" class="calibration-marker">O</div>
       <div id="calibrationXMarker" class="calibration-marker x-point">X</div>
       <div id="targetFinderReferenceMarker" class="target-marker reference-target"></div>
@@ -437,7 +450,9 @@
     let calibrationMode = false;
     let calibrationPoints = [];
     let planeAxisOverlays = [];
+    let yoloPanelEdgeOverlays = [];
     let frameLoadToken = 0;
+    let analysisRequestToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
     function initializePointSlotMarkers() {
@@ -563,6 +578,7 @@
       updateCoordinateFrame();
       updateCalibrationMarkers();
       updatePlaneAxesOverlay();
+      updateYoloPanelOverlay();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
@@ -585,6 +601,8 @@
       $("semantic").title = status.yolo.enabled
         ? `模型：${status.yolo.model_path}`
         : "启动 run-pointcloud.sh 时传入 --model 才能启用";
+      $("yoloPanelFit").disabled = !status.yolo.enabled;
+      $("yoloPanelFit").title = $("semantic").title;
       const data = await json("/api/sessions");
       $("session").innerHTML = (data.sessions || []).map(item =>
         `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${item.frame_count} 帧</option>`
@@ -676,6 +694,7 @@
       syncCalibrationButton();
       rebuildSemanticMarkers();
       rebuildPlaneAxesOverlay();
+      rebuildYoloPanelOverlay();
       await loadSavedAnnotation(session, frame, loadToken);
       if (loadToken !== frameLoadToken) return;
       if (!$("rgbPicker").hidden) await loadRgbImage();
@@ -693,6 +712,7 @@
         plane_analysis_max_points: Number($("planeAnalysisMaxPoints").value),
         min_plane_points: Number($("minPlanePoints").value),
         include_plane_debug: $("planes").checked,
+        include_yolo_panel_fit: $("yoloPanelFit").checked,
       };
     }
 
@@ -769,6 +789,7 @@
       const session = options.session || $("session").value;
       const frame = options.frame || $("frame").value;
       if (!session || !frame) throw new Error("请先选择会话和帧");
+      const requestToken = ++analysisRequestToken;
       setStatus("正在加载坐标系与 YOLO…");
       const data = await json(
         `/api/analyze/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
@@ -778,16 +799,20 @@
           body: JSON.stringify(analysisOptions()),
         }
       );
-      if (options.loadToken !== undefined &&
-          (options.loadToken !== frameLoadToken ||
-           session !== $("session").value || frame !== $("frame").value))
+      if (
+          session !== $("session").value ||
+          frame !== $("frame").value ||
+          (options.loadToken !== undefined &&
+           options.loadToken !== frameLoadToken))
         return;
+      if (requestToken !== analysisRequestToken) return;
       currentAnalysis = data.analysis;
       syncCoordinateFrameButton();
       syncCalibrationButton();
       updateAnalysisPanel();
       rebuildSemanticMarkers();
       rebuildPlaneAxesOverlay();
+      rebuildYoloPanelOverlay();
       renderRgbOverlay();
       if (currentAnalysis.plane.plane_analysis_skipped)
         setStatus(
@@ -851,15 +876,18 @@
         }
       );
       const existingPlaneSegments = currentAnalysis?.plane_segments || [];
+      const existingPanelFit = currentAnalysis?.yolo_panel_fit || null;
       currentAnalysis = {
         plane: data.annotation.plane,
         yolo: data.annotation.yolo,
         plane_segments: existingPlaneSegments,
+        yolo_panel_fit: existingPanelFit,
       };
       syncCoordinateFrameButton();
       syncCalibrationButton();
       rebuildSemanticMarkers();
       rebuildPlaneAxesOverlay();
+      rebuildYoloPanelOverlay();
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
@@ -1288,6 +1316,61 @@
       }
     }
 
+    function rebuildYoloPanelOverlay() {
+      const overlay = $("yoloPanelOverlay");
+      overlay.replaceChildren();
+      yoloPanelEdgeOverlays = [];
+      const panel = currentAnalysis?.yolo_panel_fit;
+      if (!$("yoloPanelFit").checked || !panel?.available) {
+        overlay.hidden = true;
+        return;
+      }
+      for (const edge of panel.edges || []) {
+        const role = edge.role === "long" ? "long" : "short";
+        const line = document.createElementNS(
+          "http://www.w3.org/2000/svg", "line"
+        );
+        const label = document.createElementNS(
+          "http://www.w3.org/2000/svg", "text"
+        );
+        line.classList.add("panel-edge", role);
+        label.classList.add("panel-edge-label", role);
+        label.textContent =
+          `${role === "long" ? "长边" : "短边"} · ` +
+          `${(Number(edge.length_m) * 1000).toFixed(0)} mm`;
+        overlay.appendChild(line);
+        overlay.appendChild(label);
+        yoloPanelEdgeOverlays.push({edge, line, label});
+      }
+      overlay.hidden = yoloPanelEdgeOverlays.length === 0;
+    }
+
+    function updateYoloPanelOverlay() {
+      const overlay = $("yoloPanelOverlay");
+      if (!$("yoloPanelFit").checked || !yoloPanelEdgeOverlays.length) {
+        overlay.hidden = true;
+        return;
+      }
+      overlay.hidden = false;
+      overlay.setAttribute(
+        "viewBox", `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`
+      );
+      for (const item of yoloPanelEdgeOverlays) {
+        const start = projectPosition(item.edge.start_camera_m, false);
+        const end = projectPosition(item.edge.end_camera_m, false);
+        const visible = Boolean(start && end);
+        item.line.style.display = visible ? "" : "none";
+        item.label.style.display = visible ? "" : "none";
+        if (!visible) continue;
+        item.line.setAttribute("x1", start[0]);
+        item.line.setAttribute("y1", start[1]);
+        item.line.setAttribute("x2", end[0]);
+        item.line.setAttribute("y2", end[1]);
+        item.label.setAttribute("x", (start[0] + end[0]) / 2 + 7);
+        item.label.setAttribute("y", (start[1] + end[1]) / 2 - 7);
+      }
+    }
+
     function updateAnalysisPanel(
       local = targetPlaneCoordinates,
       saved = targetSaved,
@@ -1378,6 +1461,25 @@
             `${(savedCloud.detection.conf * 100).toFixed(1)}% · ` +
             `${savedCloud.point_count.toLocaleString()} 点`
           );
+      }
+      if ($("yoloPanelFit").checked) {
+        const panel = currentAnalysis?.yolo_panel_fit;
+        if (panel?.available) {
+          lines.push(
+            `YOLO 面板拟合: ${panel.detection?.name || "实例"} · ` +
+            `内点 ${(panel.inlier_ratio * 100).toFixed(1)}% · ` +
+            `RMS ${(panel.rms_m * 1000).toFixed(2)} mm`
+          );
+          lines.push(
+            `面板长短边: ${(panel.long_length_m * 1000).toFixed(1)} × ` +
+            `${(panel.short_length_m * 1000).toFixed(1)} mm · ` +
+            `剔除 ${panel.excluded_point_count.toLocaleString()} 点`
+          );
+        } else if (panel) {
+          lines.push(`YOLO 面板拟合: 不可用 · ${panel.reason}`);
+        } else {
+          lines.push("YOLO 面板拟合: 等待分析");
+        }
       }
       local = wallCoordinates(local);
       semanticLocal = wallCoordinates(semanticLocal);
@@ -1789,6 +1891,17 @@
     $("semantic").onchange = () => {
       if ($("semantic").checked) $("planes").checked = false;
       loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
+    };
+    $("yoloPanelFit").onchange = () => {
+      if (!$("yoloPanelFit").checked) {
+        analysisRequestToken++;
+        if (currentAnalysis) delete currentAnalysis.yolo_panel_fit;
+        rebuildYoloPanelOverlay();
+        updateAnalysisPanel();
+        setStatus("YOLO 面板拟合已关闭");
+        return;
+      }
+      analyzeCurrent().catch(e => setStatus(e.message, true));
     };
     $("planes").onchange = () => {
       if ($("planes").checked) $("semantic").checked = false;

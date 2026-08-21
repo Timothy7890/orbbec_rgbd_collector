@@ -1212,6 +1212,396 @@ def estimate_wall_x_from_secondary_plane_shape(
     return result
 
 
+def fit_yolo_panel_rectangle(
+    points_xyz: np.ndarray,
+    *,
+    threshold_m: float = 0.004,
+    min_points: int = 100,
+    min_inlier_ratio: float = 0.35,
+    grid_cell_m: float = 0.002,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Fit a local panel plane and a supported orthogonal L-shaped outline."""
+    points = np.asarray(points_xyz, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("YOLO Mask 点云必须是 N×3 数组")
+    points = points[np.isfinite(points).all(axis=1)]
+    if points.shape[0] < min_points:
+        raise ValueError(
+            f"YOLO Mask 内有效点不足：{points.shape[0]} < {min_points}"
+        )
+    if not 0.001 <= threshold_m <= 0.02:
+        raise ValueError("YOLO 面板平面阈值必须在 1–20 mm 之间")
+
+    coarse = fit_dominant_plane(
+        points,
+        threshold_m=threshold_m,
+        iterations=160,
+        min_inlier_ratio=0.20,
+        seed=seed,
+    )
+    coarse_center = np.asarray(
+        coarse["center_camera_m"], dtype=np.float64
+    )
+    coarse_normal = np.asarray(
+        coarse["normal_camera"], dtype=np.float64
+    )
+    signed_distances = (points - coarse_center) @ coarse_normal
+    plane_mask = np.abs(signed_distances) <= threshold_m
+    if int(plane_mask.sum()) < min_points:
+        raise ValueError("YOLO Mask 内局部平面内点不足")
+    inlier_ratio = float(plane_mask.mean())
+    if inlier_ratio < min_inlier_ratio:
+        raise ValueError(
+            f"YOLO 面板平面内点比例仅 {inlier_ratio:.1%}"
+        )
+
+    inliers = points[plane_mask]
+    center = inliers.mean(axis=0)
+    _, _, vh = np.linalg.svd(inliers - center, full_matrices=False)
+    normal = vh[-1]
+    normal /= np.linalg.norm(normal)
+    if float(normal @ center) < 0:
+        normal = -normal
+    final_distances = (points - center) @ normal
+    plane_mask = np.abs(final_distances) <= threshold_m
+    inliers = points[plane_mask]
+    if inliers.shape[0] < min_points:
+        raise ValueError("局部平面精化后内点不足")
+    center = inliers.mean(axis=0)
+    _, _, vh = np.linalg.svd(inliers - center, full_matrices=False)
+    normal = vh[-1]
+    normal /= np.linalg.norm(normal)
+    if float(normal @ center) < 0:
+        normal = -normal
+    residuals = (inliers - center) @ normal
+
+    basis_x = np.array([1.0, 0.0, 0.0])
+    basis_x -= float(basis_x @ normal) * normal
+    if float(np.linalg.norm(basis_x)) < 1e-6:
+        basis_x = np.array([0.0, -1.0, 0.0])
+        basis_x -= float(basis_x @ normal) * normal
+    basis_x /= np.linalg.norm(basis_x)
+    basis_z = np.cross(normal, basis_x)
+    basis_z /= np.linalg.norm(basis_z)
+    planar_basis = np.column_stack((basis_x, basis_z))
+    planar = (inliers - center) @ planar_basis
+
+    low = np.quantile(planar, 0.005, axis=0)
+    high = np.quantile(planar, 0.995, axis=0)
+    extent = high - low
+    if float(np.min(extent)) < 0.02:
+        raise ValueError("YOLO 面板平面范围太小，无法识别长短边")
+    cell_size = max(
+        grid_cell_m,
+        float(np.max(extent)) / 900.0,
+    )
+    grid_shape = np.ceil(extent / cell_size).astype(np.int64) + 5
+    grid_shape = np.maximum(grid_shape, 8)
+    grid = np.zeros((int(grid_shape[1]), int(grid_shape[0])), np.uint8)
+    cells = np.rint((planar - low) / cell_size).astype(np.int64) + 2
+    valid_cells = (
+        (cells[:, 0] >= 0)
+        & (cells[:, 0] < grid.shape[1])
+        & (cells[:, 1] >= 0)
+        & (cells[:, 1] < grid.shape[0])
+    )
+    grid[cells[valid_cells, 1], cells[valid_cells, 0]] = 1
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    grid = cv2.morphologyEx(grid, cv2.MORPH_CLOSE, close_kernel)
+    component_count, component_labels, stats, _ = (
+        cv2.connectedComponentsWithStats(grid, connectivity=8)
+    )
+    if component_count <= 1:
+        raise ValueError("YOLO 面板平面没有稳定连通区域")
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = (component_labels == largest_label).astype(np.uint8)
+    contours, _ = cv2.findContours(
+        component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
+    if not contours:
+        raise ValueError("YOLO 面板平面无法提取外轮廓")
+    contour = max(contours, key=cv2.contourArea)
+    boundary = np.zeros_like(component)
+    cv2.drawContours(boundary, [contour], -1, 255, 1)
+    min_line_pixels = max(8, int(min(grid.shape) * 0.10))
+    hough = cv2.HoughLinesP(
+        boundary,
+        rho=1,
+        theta=np.pi / 360.0,
+        threshold=max(8, min_line_pixels // 2),
+        minLineLength=min_line_pixels,
+        maxLineGap=max(4, int(round(0.012 / cell_size))),
+    )
+    if hough is None or len(hough) < 2:
+        raise ValueError("面板外轮廓没有足够的直线边支持")
+
+    segments: list[dict[str, Any]] = []
+    total_segment_length = 0.0
+    for raw_line in np.asarray(hough).reshape(-1, 4):
+        x1, y1, x2, y2 = [float(value) for value in raw_line]
+        start_2d = low + (np.array([x1, y1]) - 2.0) * cell_size
+        end_2d = low + (np.array([x2, y2]) - 2.0) * cell_size
+        delta = end_2d - start_2d
+        length = float(np.linalg.norm(delta))
+        if length < 0.012:
+            continue
+        direction = delta / length
+        total_segment_length += length
+        segments.append(
+            {
+                "start": start_2d,
+                "end": end_2d,
+                "midpoint": (start_2d + end_2d) * 0.5,
+                "direction": direction,
+                "length": length,
+            }
+        )
+    if len(segments) < 2 or total_segment_length < 0.03:
+        raise ValueError("面板边界直线长度不足")
+    direction_tolerance_cos = float(np.cos(np.radians(15.0)))
+    best_orientation: tuple[float, np.ndarray, np.ndarray] | None = None
+    best_orientation_score = -1.0
+    for candidate in segments:
+        axis_a_candidate = np.asarray(candidate["direction"])
+        axis_b_candidate = np.array(
+            [-axis_a_candidate[1], axis_a_candidate[0]]
+        )
+        support_a = 0.0
+        support_b = 0.0
+        for segment in segments:
+            direction = np.asarray(segment["direction"])
+            length = float(segment["length"])
+            alignment_a = abs(float(direction @ axis_a_candidate))
+            alignment_b = abs(float(direction @ axis_b_candidate))
+            if max(alignment_a, alignment_b) < direction_tolerance_cos:
+                continue
+            if alignment_a >= alignment_b:
+                support_a += length
+            else:
+                support_b += length
+        aligned_support = support_a + support_b
+        balance = min(support_a, support_b) / max(
+            support_a, support_b, 1e-9
+        )
+        score = aligned_support * (0.5 + 0.5 * balance)
+        if score > best_orientation_score:
+            best_orientation_score = score
+            best_orientation = (
+                aligned_support,
+                axis_a_candidate,
+                axis_b_candidate,
+            )
+    assert best_orientation is not None
+    aligned_support, axis_a, axis_b = best_orientation
+    orientation_concentration = float(
+        aligned_support / total_segment_length
+    )
+    if orientation_concentration < 0.35:
+        raise ValueError("面板边界方向不稳定")
+    positions_a = planar @ axis_a
+    positions_b = planar @ axis_b
+    a_min, a_max = np.quantile(positions_a, [0.01, 0.99])
+    b_min, b_max = np.quantile(positions_b, [0.01, 0.99])
+    if a_max - a_min >= b_max - b_min:
+        long_axis_2d, short_axis_2d = axis_a, axis_b
+        long_min, long_max = float(a_min), float(a_max)
+        short_min, short_max = float(b_min), float(b_max)
+    else:
+        long_axis_2d, short_axis_2d = axis_b, -axis_a
+        long_min, long_max = float(b_min), float(b_max)
+        short_positions = planar @ short_axis_2d
+        short_min, short_max = [
+            float(value)
+            for value in np.quantile(short_positions, [0.01, 0.99])
+        ]
+
+    angle_tolerance_cos = direction_tolerance_cos
+    offset_tolerance = max(0.015, threshold_m * 3.0)
+
+    def supported_offset(
+        axis_direction: np.ndarray,
+        offset_direction: np.ndarray,
+        expected: float,
+    ) -> tuple[float, float]:
+        candidates: list[tuple[float, float]] = []
+        for segment in segments:
+            alignment = abs(
+                float(np.asarray(segment["direction"]) @ axis_direction)
+            )
+            offset = float(
+                np.asarray(segment["midpoint"]) @ offset_direction
+            )
+            if (
+                alignment >= angle_tolerance_cos
+                and abs(offset - expected) <= offset_tolerance
+            ):
+                candidates.append((offset, float(segment["length"])))
+        if not candidates:
+            return expected, 0.0
+        weights = np.asarray([item[1] for item in candidates])
+        values = np.asarray([item[0] for item in candidates])
+        return (
+            float(np.average(values, weights=weights)),
+            float(weights.sum()),
+        )
+
+    short_min, long_at_short_min = supported_offset(
+        long_axis_2d, short_axis_2d, short_min
+    )
+    short_max, long_at_short_max = supported_offset(
+        long_axis_2d, short_axis_2d, short_max
+    )
+    long_min, short_at_long_min = supported_offset(
+        short_axis_2d, long_axis_2d, long_min
+    )
+    long_max, short_at_long_max = supported_offset(
+        short_axis_2d, long_axis_2d, long_max
+    )
+    if max(long_at_short_min, long_at_short_max) < 0.012:
+        raise ValueError("没有找到受点云支持的完整长边")
+    if max(short_at_long_min, short_at_long_max) < 0.012:
+        raise ValueError("没有找到受点云支持的完整短边")
+
+    selected_short = (
+        short_min
+        if long_at_short_min >= long_at_short_max
+        else short_max
+    )
+    selected_long = (
+        long_min
+        if short_at_long_min >= short_at_long_max
+        else long_max
+    )
+    opposite_long = (
+        long_max if selected_long == long_min else long_min
+    )
+    opposite_short = (
+        short_max if selected_short == short_min else short_min
+    )
+
+    def camera_point(long_position: float, short_position: float) -> np.ndarray:
+        planar_position = (
+            long_position * long_axis_2d
+            + short_position * short_axis_2d
+        )
+        return center + planar_basis @ planar_position
+
+    corner = camera_point(selected_long, selected_short)
+    long_end = camera_point(opposite_long, selected_short)
+    short_end = camera_point(selected_long, opposite_short)
+    long_axis_camera = planar_basis @ long_axis_2d
+    short_axis_camera = planar_basis @ short_axis_2d
+    long_axis_camera /= np.linalg.norm(long_axis_camera)
+    short_axis_camera /= np.linalg.norm(short_axis_camera)
+    long_length = float(abs(opposite_long - selected_long))
+    short_length = float(abs(opposite_short - selected_short))
+    return {
+        "available": True,
+        "fit_method": "local-ransac-supported-orthogonal-rectangle",
+        "point_count": int(points.shape[0]),
+        "inlier_count": int(inliers.shape[0]),
+        "inlier_ratio": float(inliers.shape[0] / points.shape[0]),
+        "excluded_point_count": int(points.shape[0] - inliers.shape[0]),
+        "camera_side_protrusion_point_count": int(
+            (final_distances < -threshold_m).sum()
+        ),
+        "threshold_m": float(threshold_m),
+        "rms_m": float(np.sqrt(np.mean(residuals**2))),
+        "center_camera_m": center.tolist(),
+        "normal_camera": normal.tolist(),
+        "long_axis_camera": long_axis_camera.tolist(),
+        "short_axis_camera": short_axis_camera.tolist(),
+        "long_length_m": long_length,
+        "short_length_m": short_length,
+        "axis_aspect_ratio": float(
+            long_length / max(short_length, 1e-9)
+        ),
+        "orientation_support": orientation_concentration,
+        "edges": [
+            {
+                "role": "long",
+                "start_camera_m": corner.tolist(),
+                "end_camera_m": long_end.tolist(),
+                "length_m": long_length,
+                "support_length_m": float(
+                    max(long_at_short_min, long_at_short_max)
+                ),
+            },
+            {
+                "role": "short",
+                "start_camera_m": corner.tolist(),
+                "end_camera_m": short_end.tolist(),
+                "length_m": short_length,
+                "support_length_m": float(
+                    max(short_at_long_min, short_at_long_max)
+                ),
+            },
+        ],
+    }
+
+
+def analyze_yolo_mask_panel(
+    points_xyz: np.ndarray,
+    pixel_coordinates: np.ndarray,
+    boxes: list[dict[str, Any]],
+    image_shape: tuple[int, int] | list[int] | None,
+    *,
+    threshold_m: float = 0.004,
+    min_points: int = 100,
+) -> dict[str, Any]:
+    if not boxes:
+        return {"available": False, "reason": "当前帧没有 YOLO 实例"}
+    valid_boxes = [
+        (index, box)
+        for index, box in enumerate(boxes)
+        if np.isfinite(float(box.get("conf", 0.0)))
+    ]
+    if not valid_boxes:
+        return {"available": False, "reason": "YOLO 实例置信度无效"}
+    box_index, box = max(
+        valid_boxes, key=lambda item: float(item[1].get("conf", 0.0))
+    )
+    points = np.asarray(points_xyz, dtype=np.float64)
+    pixels = np.asarray(pixel_coordinates, dtype=np.float64)
+    if pixels.shape != (points.shape[0], 2):
+        raise ValueError("像素坐标必须与点云一一对应")
+    shape = (
+        (int(image_shape[0]), int(image_shape[1]))
+        if image_shape is not None and len(image_shape) == 2
+        else None
+    )
+    inside = detection_pixel_mask(
+        pixels[:, 0], pixels[:, 1], box, image_shape=shape
+    )
+    mask_points = points[inside]
+    detection = {
+        "box_index": int(box_index),
+        "cls": int(box.get("cls", -1)),
+        "name": str(box.get("name", box.get("cls", "unknown"))),
+        "conf": float(box.get("conf", 0.0)),
+        "xyxy": box.get("xyxy"),
+        "used_polygon_mask": bool(box.get("polygon") is not None),
+    }
+    try:
+        fitted = fit_yolo_panel_rectangle(
+            mask_points,
+            threshold_m=threshold_m,
+            min_points=min_points,
+            seed=20_000 + int(box_index),
+        )
+    except ValueError as exc:
+        return {
+            "available": False,
+            "reason": str(exc),
+            "mask_point_count": int(mask_points.shape[0]),
+            "detection": detection,
+        }
+    fitted["mask_point_count"] = int(mask_points.shape[0])
+    fitted["detection"] = detection
+    return fitted
+
+
 def analyze_frame(
     data_root: Path,
     session_id: str,
@@ -1228,6 +1618,7 @@ def analyze_frame(
     use_saved_wall_calibration: bool = True,
     include_plane_debug: bool = False,
     include_highest_confidence_semantic_cloud: bool = False,
+    include_yolo_panel_fit: bool = False,
 ) -> dict[str, Any]:
     if min_plane_points < 3:
         raise ValueError("最少平面点数不能小于 3")
@@ -1247,10 +1638,11 @@ def analyze_frame(
         min_depth_m=min_depth_m,
         max_depth_m=max_depth_m,
         max_points=max_points,
-        include_pixels=run_plane_analysis,
+        include_pixels=run_plane_analysis or include_yolo_panel_fit,
     )
+    pixel_coordinates = metadata.pop("_pixel_coordinates", None)
     if run_plane_analysis:
-        pixel_coordinates = metadata.pop("_pixel_coordinates")
+        assert pixel_coordinates is not None
         plane_xyz = cloud["xyz"]
         plane_pixels = pixel_coordinates
         if plane_xyz.shape[0] > plane_analysis_max_points:
@@ -1363,6 +1755,14 @@ def analyze_frame(
         },
         "source": metadata,
     }
+    if include_yolo_panel_fit:
+        assert pixel_coordinates is not None
+        result["yolo_panel_fit"] = analyze_yolo_mask_panel(
+            cloud["xyz"],
+            pixel_coordinates,
+            boxes or [],
+            metadata.get("image_shape"),
+        )
     if include_highest_confidence_semantic_cloud:
         result["_highest_confidence_semantic_cloud"] = (
             highest_confidence_semantic_pointcloud(

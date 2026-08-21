@@ -301,6 +301,9 @@ def create_pointcloud_app(
                     options.get("include_plane_debug", False)
                 ),
                 include_highest_confidence_semantic_cloud=True,
+                include_yolo_panel_fit=bool(
+                    options.get("include_yolo_panel_fit", False)
+                ),
             )
             semantic_cloud = result.pop(
                 "_highest_confidence_semantic_cloud", None

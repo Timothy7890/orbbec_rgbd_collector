@@ -496,6 +496,10 @@ def create_pointcloud_app(
             analysis_cache[cache_key] = {
                 "semantic_cloud": semantic_cloud,
                 "yolo": copy.deepcopy(result["yolo"]),
+                "plane": copy.deepcopy(result["plane"]),
+                "yolo_panel_fit": copy.deepcopy(
+                    result.get("yolo_panel_fit")
+                ),
             }
             analysis_cache.move_to_end(cache_key)
             while len(analysis_cache) > 32:
@@ -515,13 +519,42 @@ def create_pointcloud_app(
         options = body or {}
         version = str(options.get("version", "0.1.0"))
         try:
+            model = next(
+                (
+                    item
+                    for item in target_finder_models()
+                    if item["version"] == version
+                ),
+                None,
+            )
+            if model is None:
+                raise ValueError(f"未知找点算法版本: {version}")
+            requires_panel = (
+                model["algorithm"]
+                == "yolo-panel-rectangle-center-plus-wall-offset"
+            )
             cache_key = (session_id, frame_id)
             cached = analysis_cache.get(cache_key)
             submitted_plane = options.get("plane")
+            semantic_cloud = (
+                cached.get("semantic_cloud")
+                if cached is not None
+                else None
+            )
+            panel_fit = (
+                cached.get("yolo_panel_fit")
+                if cached is not None
+                else None
+            )
+            analyzed_plane = (
+                cached.get("plane") if cached is not None else None
+            )
             if cached is not None:
                 analysis_cache.move_to_end(cache_key)
-                semantic_cloud = cached["semantic_cloud"]
-            else:
+            if cached is None or (
+                requires_panel
+                and not bool(panel_fit and panel_fit.get("available"))
+            ):
                 boxes = (
                     detector.infer_frame(root, session_id, frame_id)
                     if detector.enabled
@@ -546,22 +579,35 @@ def create_pointcloud_app(
                         options.get("min_plane_points", 300)
                     ),
                     include_highest_confidence_semantic_cloud=True,
+                    include_yolo_panel_fit=requires_panel,
                 )
                 semantic_cloud = analysis.pop(
                     "_highest_confidence_semantic_cloud", None
                 )
+                panel_fit = analysis.get("yolo_panel_fit")
+                analyzed_plane = analysis["plane"]
                 analysis_cache[cache_key] = {
                     "semantic_cloud": semantic_cloud,
                     "yolo": copy.deepcopy(analysis["yolo"]),
+                    "plane": copy.deepcopy(analyzed_plane),
+                    "yolo_panel_fit": copy.deepcopy(panel_fit),
                 }
                 analysis_cache.move_to_end(cache_key)
                 while len(analysis_cache) > 32:
                     analysis_cache.popitem(last=False)
-                if not isinstance(submitted_plane, dict):
-                    submitted_plane = analysis["plane"]
-            if semantic_cloud is None:
+            if (
+                not isinstance(submitted_plane, dict)
+                or (
+                    requires_panel
+                    and not submitted_plane.get("calibrated")
+                )
+            ):
+                submitted_plane = analyzed_plane
+            if semantic_cloud is None and not requires_panel:
                 raise ValueError("当前帧没有可用于找点的 YOLO 语义点云")
-            if isinstance(submitted_plane, dict):
+            if semantic_cloud is not None and isinstance(
+                submitted_plane, dict
+            ):
                 semantic_cloud = reproject_semantic_pointcloud(
                     semantic_cloud, submitted_plane
                 )
@@ -581,12 +627,22 @@ def create_pointcloud_app(
                 semantic_cloud,
                 version=version,
                 reference_target_camera_m=reference_target,
+                panel_fit=panel_fit,
+                plane=(
+                    submitted_plane
+                    if isinstance(submitted_plane, dict)
+                    else None
+                ),
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "prediction": prediction}
+        return {
+            "ok": True,
+            "prediction": prediction,
+            "panel_fit": panel_fit if requires_panel else None,
+        }
 
     @app.get("/api/sessions/{session_id}/annotations")
     def annotations(session_id: str):

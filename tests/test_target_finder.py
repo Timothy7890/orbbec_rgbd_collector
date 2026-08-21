@@ -81,6 +81,69 @@ class TargetFinderTests(unittest.TestCase):
         self.assertFalse(prediction["model"]["uses_camera_plane_distance"])
         self.assertFalse(prediction["model"]["uses_camera_plane_angles"])
 
+    def test_version_0_1_0_s_uses_panel_rectangle_center(self) -> None:
+        models = {model["version"]: model for model in target_finder_models()}
+        plane = {
+            "calibrated": True,
+            "origin_camera_m": [1.0, 2.0, 3.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 1.0, 0.0],
+            "z_axis_camera": [0.0, 0.0, 1.0],
+        }
+        panel_center_wall = np.array([0.12, -0.01, 0.20])
+        panel_fit = {
+            "available": True,
+            "rectangle_center_camera_m": (
+                np.asarray(plane["origin_camera_m"]) + panel_center_wall
+            ).tolist(),
+            "detection": {"name": "panel", "conf": 0.95},
+            "inlier_ratio": 0.9,
+            "rms_m": 0.0015,
+        }
+
+        prediction = predict_target_one(
+            None,
+            version="0.1.0-s",
+            panel_fit=panel_fit,
+            plane=plane,
+        )
+
+        expected_wall = panel_center_wall + np.asarray(
+            models["0.1.0-s"]["offset_wall_m"]
+        )
+        np.testing.assert_allclose(
+            prediction["target_wall_m"], expected_wall, atol=1e-9
+        )
+        np.testing.assert_allclose(
+            prediction["target_camera_m"],
+            np.asarray(plane["origin_camera_m"]) + expected_wall,
+            atol=1e-9,
+        )
+        self.assertEqual(
+            prediction["reference_source"],
+            "yolo-panel-rectangle-center",
+        )
+        self.assertEqual(prediction["model"]["training_frame_count"], 33)
+        self.assertNotIn("semantic_point_count", prediction)
+
+    def test_version_0_1_0_s_requires_saved_coordinate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "仅支持已保存坐标系"):
+            predict_target_one(
+                None,
+                version="0.1.0-s",
+                panel_fit={
+                    "available": True,
+                    "rectangle_center_camera_m": [0.0, 0.0, 1.0],
+                },
+                plane={
+                    "calibrated": False,
+                    "origin_camera_m": [0.0, 0.0, 1.0],
+                    "x_axis_camera": [1.0, 0.0, 0.0],
+                    "y_axis_camera": [0.0, 0.0, 1.0],
+                    "z_axis_camera": [0.0, -1.0, 0.0],
+                },
+            )
+
     def test_unknown_model_version_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "未知找点算法版本"):
             predict_target_one(self.semantic_cloud(), version="9.9.9")

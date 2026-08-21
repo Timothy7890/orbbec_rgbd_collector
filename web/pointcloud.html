@@ -754,7 +754,11 @@
         const option = document.createElement("option");
         option.value = model.version;
         option.textContent =
-          `${model.version} · ${model.name}（${model.training_frame_count}帧）`;
+          `${model.version} · ${model.name}（${model.training_frame_count}帧·` +
+          `${model.reference_source === "yolo-panel-rectangle-center"
+            ? "面板中心" : "YOLO中心"}）`;
+        option.dataset.requiresSavedCoordinate =
+          model.requires_saved_wall_coordinate ? "true" : "false";
         select.appendChild(option);
       }
       select.value = data.default_version || select.options[0]?.value || "";
@@ -768,6 +772,11 @@
       if (!version) throw new Error("没有可用的找点算法版本");
       if (!wallAxes(currentAnalysis?.plane))
         throw new Error("请先等待当前帧坐标系与 YOLO 分析完成");
+      const selectedModel = $("targetFinderVersion").selectedOptions[0];
+      if (
+          selectedModel?.dataset.requiresSavedCoordinate === "true" &&
+          !currentAnalysis?.plane?.calibrated)
+        throw new Error(`算法 ${version} 仅支持已保存坐标系的帧`);
       setStatus(`正在使用算法 ${version} 查找点1…`);
       const data = await json(
         `/api/target-finder/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
@@ -783,6 +792,11 @@
       );
       if (session !== $("session").value || frame !== $("frame").value) return;
       const prediction = data.prediction;
+      if (data.panel_fit?.available && currentAnalysis) {
+        currentAnalysis.yolo_panel_fit = data.panel_fit;
+        $("yoloPanelFit").checked = true;
+        rebuildYoloPanelOverlay();
+      }
       activatePointSlot(1, false);
       selectedTarget = [...prediction.target_camera_m];
       selectedPixel = null;
@@ -1547,10 +1561,16 @@
         lines.push(`选点来源: ${sourceLabel}`);
       }
       if (targetFinderPrediction) {
+        const usesPanelCenter =
+          targetFinderPrediction.reference_source ===
+          "yolo-panel-rectangle-center";
         lines.push(
           `找点模型: ${targetFinderPrediction.model.version} · ` +
           `${targetFinderPrediction.model.training_frame_count}帧实验版 · ` +
-          `YOLO ${targetFinderPrediction.semantic_point_count.toLocaleString()} 点`
+          (usesPanelCenter
+            ? "粉色面板几何中心"
+            : `YOLO ${targetFinderPrediction.semantic_point_count
+                .toLocaleString()} 点`)
         );
         const validation = targetFinderPrediction.validation;
         if (validation) {
@@ -1665,7 +1685,14 @@
       if (local)
         lines.push(`墙面坐标 mm: X ${(local.x_m * 1000).toFixed(1)}, Y ${(local.y_m * 1000).toFixed(1)}, Z ${(local.z_m * 1000).toFixed(1)}`);
       if (semanticLocal)
-        lines.push(`相对语义簇 mm: dX ${(semanticLocal.x_m * 1000).toFixed(1)}, dY ${(semanticLocal.y_m * 1000).toFixed(1)}, dZ ${(semanticLocal.z_m * 1000).toFixed(1)}`);
+        lines.push(
+          `${targetFinderPrediction?.reference_source ===
+            "yolo-panel-rectangle-center"
+            ? "相对面板中心" : "相对语义簇"} mm: ` +
+          `dX ${(semanticLocal.x_m * 1000).toFixed(1)}, ` +
+          `dY ${(semanticLocal.y_m * 1000).toFixed(1)}, ` +
+          `dZ ${(semanticLocal.z_m * 1000).toFixed(1)}`
+        );
       if (selectedTarget)
         lines.push(targetSaved || saved ? "状态: 已保存" : "状态: 有未保存修改");
       $("analysis").textContent = lines.length ? lines.join("\n") : "尚未分析或点选";

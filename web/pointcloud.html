@@ -91,6 +91,18 @@
       font: 600 12px/1.35 sans-serif; white-space: nowrap;
       pointer-events: none;
     }
+    .coordinate-frame {
+      position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%;
+      overflow: visible; pointer-events: none;
+    }
+    .coordinate-frame line {
+      stroke-width: 3; stroke-linecap: round;
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, .9));
+    }
+    .coordinate-frame text {
+      font: 700 14px/1 sans-serif; paint-order: stroke;
+      stroke: rgba(0, 0, 0, .9); stroke-width: 3px; stroke-linejoin: round;
+    }
     .rgb-picker {
       position: fixed; z-index: 100; inset: 0; padding: 14px;
       display: flex; flex-direction: column;
@@ -182,11 +194,12 @@
       <label>柜面 RANSAC 阈值（mm）
         <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
       </label>
-      <label>WASDQE 微调步长（mm）
+      <label>墙面坐标微调步长（mm）
         <input id="nudgeStep" type="number" min="0.1" max="100" step="0.1" value="1">
       </label>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
+      <button id="coordinateBtn" class="secondary" disabled>显示坐标系</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
@@ -194,12 +207,32 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧。直接单击点云选点；左键拖动旋转，右键拖动平移，滚轮缩放。A/D 调 X，W/S 调 Y，Q/E 调 Z。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧。直接单击点云选点；左键拖动旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。微调前请先分析墙面。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
       <canvas id="canvas"></canvas>
       <div id="hud" class="hud">0 points</div>
+      <svg id="coordinateFrame" class="coordinate-frame" hidden>
+        <defs>
+          <marker id="arrowX" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#ff5c5c"></path>
+          </marker>
+          <marker id="arrowY" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#4dd69a"></path>
+          </marker>
+          <marker id="arrowZ" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#4d8eff"></path>
+          </marker>
+        </defs>
+        <circle id="axisOrigin" r="4" fill="#ffffff"></circle>
+        <line id="axisX" stroke="#ff5c5c" marker-end="url(#arrowX)"></line>
+        <line id="axisY" stroke="#4dd69a" marker-end="url(#arrowY)"></line>
+        <line id="axisZ" stroke="#4d8eff" marker-end="url(#arrowZ)"></line>
+        <text id="axisLabelX" fill="#ff5c5c">X</text>
+        <text id="axisLabelY" fill="#4dd69a">Y</text>
+        <text id="axisLabelZ" fill="#4d8eff">Z</text>
+      </svg>
       <div id="targetMarker" class="target-marker"></div>
       <div id="semanticMarkers"></div>
       <div id="rgbPicker" class="rgb-picker" hidden>
@@ -302,6 +335,7 @@
     let targetAdjustment = [0, 0, 0];
     let targetSaved = false;
     let semanticMarkers = [];
+    let coordinateFrameVisible = false;
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
     function savedSelection() {
@@ -359,6 +393,7 @@
       }
       updateTargetMarker();
       updateSemanticMarkers();
+      updateCoordinateFrame();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
@@ -451,6 +486,8 @@
       targetAdjustment = [0, 0, 0];
       targetSaved = false;
       currentAnalysis = null;
+      coordinateFrameVisible = false;
+      syncCoordinateFrameButton();
       rebuildSemanticMarkers();
       await loadSavedAnnotation();
       if (!$("rgbPicker").hidden) await loadRgbImage();
@@ -478,6 +515,7 @@
         }
       );
       currentAnalysis = data.analysis;
+      syncCoordinateFrameButton();
       updateAnalysisPanel();
       rebuildSemanticMarkers();
       renderRgbOverlay();
@@ -508,6 +546,7 @@
         plane: data.annotation.plane,
         yolo: data.annotation.yolo,
       };
+      syncCoordinateFrameButton();
       rebuildSemanticMarkers();
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
@@ -547,8 +586,84 @@
         targetSaved = false;
         updateAnalysisPanel();
       }
+      syncCoordinateFrameButton();
       rebuildSemanticMarkers();
       renderRgbOverlay();
+    }
+
+    function wallCoordinates(coordinates) {
+      if (!coordinates) return null;
+      if ("x_m" in coordinates) return coordinates;
+      return {
+        x_m: coordinates.horizontal_m,
+        y_m: -coordinates.normal_m,
+        z_m: -coordinates.vertical_m,
+      };
+    }
+
+    function wallAxes(plane) {
+      if (!plane) return null;
+      if (plane.x_axis_camera && plane.y_axis_camera && plane.z_axis_camera)
+        return [plane.x_axis_camera, plane.y_axis_camera, plane.z_axis_camera];
+      if (plane.horizontal_axis_camera && plane.normal_camera && plane.vertical_axis_camera)
+        return [
+          plane.horizontal_axis_camera,
+          plane.normal_camera.map(value => -value),
+          plane.vertical_axis_camera.map(value => -value),
+        ];
+      return null;
+    }
+
+    function syncCoordinateFrameButton() {
+      const available = Boolean(wallAxes(currentAnalysis?.plane));
+      $("coordinateBtn").disabled = !available;
+      $("coordinateBtn").textContent =
+        coordinateFrameVisible ? "隐藏坐标系" : "显示坐标系";
+      if (!available) $("coordinateFrame").hidden = true;
+    }
+
+    function updateCoordinateFrame() {
+      const overlay = $("coordinateFrame");
+      const plane = currentAnalysis?.plane;
+      const axes = wallAxes(plane);
+      const origin = plane?.center_camera_m || plane?.origin_camera_m;
+      if (!coordinateFrameVisible || !axes || !Array.isArray(origin)) {
+        overlay.hidden = true;
+        return;
+      }
+      const originScreen = projectPosition(origin);
+      if (!originScreen) {
+        overlay.hidden = true;
+        return;
+      }
+      const axisLength = Math.min(0.25, Math.max(0.05, radius * 0.18));
+      overlay.hidden = false;
+      overlay.setAttribute(
+        "viewBox", `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`
+      );
+      $("axisOrigin").setAttribute("cx", originScreen[0]);
+      $("axisOrigin").setAttribute("cy", originScreen[1]);
+      ["X", "Y", "Z"].forEach((name, index) => {
+        const endpoint = origin.map(
+          (value, component) => value + axes[index][component] * axisLength
+        );
+        const endpointScreen = projectPosition(endpoint);
+        const line = $(`axis${name}`);
+        const label = $(`axisLabel${name}`);
+        if (!endpointScreen) {
+          line.style.display = "none";
+          label.style.display = "none";
+          return;
+        }
+        line.style.display = "";
+        label.style.display = "";
+        line.setAttribute("x1", originScreen[0]);
+        line.setAttribute("y1", originScreen[1]);
+        line.setAttribute("x2", endpointScreen[0]);
+        line.setAttribute("y2", endpointScreen[1]);
+        label.setAttribute("x", endpointScreen[0] + 7);
+        label.setAttribute("y", endpointScreen[1] - 7);
+      });
     }
 
     function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
@@ -561,10 +676,12 @@
       if (selectedPixel)
         lines.push(`RGB 像素: (${selectedPixel.u}, ${selectedPixel.v})`);
       if (targetAdjustment.some(value => Math.abs(value) > 1e-9))
-        lines.push(`累计微调 mm: dX ${(targetAdjustment[0] * 1000).toFixed(1)}, dY ${(targetAdjustment[1] * 1000).toFixed(1)}, dZ ${(targetAdjustment[2] * 1000).toFixed(1)}`);
+        lines.push(`累计微调（相机系）mm: dX ${(targetAdjustment[0] * 1000).toFixed(1)}, dY ${(targetAdjustment[1] * 1000).toFixed(1)}, dZ ${(targetAdjustment[2] * 1000).toFixed(1)}`);
       if (currentAnalysis?.plane) {
         const p = currentAnalysis.plane;
-        lines.push(`柜面法向: ${p.normal_camera.map(v => v.toFixed(4)).join(", ")}`);
+        const axes = wallAxes(p);
+        lines.push(`墙面 +Y 法向（相机系）: ${axes[1].map(v => v.toFixed(4)).join(", ")}`);
+        lines.push(`墙面 +Z 向上（相机系）: ${axes[2].map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
       }
       if (currentAnalysis?.yolo) {
@@ -572,10 +689,12 @@
         const masks = instances.filter(item => item.polygon?.length >= 3).length;
         lines.push(`YOLO 实例: ${instances.length}（Mask ${masks}）`);
       }
+      local = wallCoordinates(local);
+      semanticLocal = wallCoordinates(semanticLocal);
       if (local)
-        lines.push(`柜面坐标 mm: H ${(local.horizontal_m * 1000).toFixed(1)}, V ${(local.vertical_m * 1000).toFixed(1)}, N ${(local.normal_m * 1000).toFixed(1)}`);
+        lines.push(`墙面坐标 mm: X ${(local.x_m * 1000).toFixed(1)}, Y ${(local.y_m * 1000).toFixed(1)}, Z ${(local.z_m * 1000).toFixed(1)}`);
       if (semanticLocal)
-        lines.push(`相对语义簇 mm: dH ${(semanticLocal.horizontal_m * 1000).toFixed(1)}, dV ${(semanticLocal.vertical_m * 1000).toFixed(1)}, dN ${(semanticLocal.normal_m * 1000).toFixed(1)}`);
+        lines.push(`相对语义簇 mm: dX ${(semanticLocal.x_m * 1000).toFixed(1)}, dY ${(semanticLocal.y_m * 1000).toFixed(1)}, dZ ${(semanticLocal.z_m * 1000).toFixed(1)}`);
       if (saved) lines.push("状态: 已保存");
       $("analysis").textContent = lines.length ? lines.join("\n") : "尚未分析或点选";
     }
@@ -794,13 +913,18 @@
     function nudgeTarget(code) {
       const commands = {
         KeyA: [0, -1], KeyD: [0, 1],
-        KeyW: [1, -1], KeyS: [1, 1],
-        KeyQ: [2, -1], KeyE: [2, 1],
+        KeyW: [2, 1], KeyS: [2, -1],
+        KeyQ: [1, -1], KeyE: [1, 1],
       };
       const command = commands[code];
       if (!command) return false;
       if (!selectedTarget) {
         setStatus("请先选择三维目标", true);
+        return true;
+      }
+      const axes = wallAxes(currentAnalysis?.plane);
+      if (!axes) {
+        setStatus("请先分析墙面，再使用墙面坐标微调", true);
         return true;
       }
       const step = Number($("nudgeStep").value) / 1000;
@@ -809,14 +933,16 @@
         return true;
       }
       const [axis, direction] = command;
-      const next = [...selectedTarget];
-      next[axis] += direction * step;
+      const cameraDelta = axes[axis].map(value => value * direction * step);
+      const next = selectedTarget.map((value, index) => value + cameraDelta[index]);
       if (next[2] <= 0) {
         setStatus("Z 坐标必须大于零", true);
         return true;
       }
       selectedTarget = next;
-      targetAdjustment[axis] += direction * step;
+      targetAdjustment = targetAdjustment.map(
+        (value, index) => value + cameraDelta[index]
+      );
       updateAnalysisPanel();
       setStatus(
         `已微调 ${["X", "Y", "Z"][axis]} ${direction > 0 ? "+" : "−"}${(step * 1000).toFixed(1)} mm`,
@@ -847,6 +973,14 @@
     $("semantic").onchange = () =>
       loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
+    $("coordinateBtn").onclick = () => {
+      if (!wallAxes(currentAnalysis?.plane)) {
+        setStatus("请先分析墙面", true);
+        return;
+      }
+      coordinateFrameVisible = !coordinateFrameVisible;
+      syncCoordinateFrameButton();
+    };
     $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
     $("closeRgbBtn").onclick = () => {
       $("rgbPicker").hidden = true;

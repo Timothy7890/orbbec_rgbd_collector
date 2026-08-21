@@ -36,8 +36,44 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreater(fitted["inlier_ratio"], 0.80)
         self.assertLess(fitted["rms_m"], 0.003)
         np.testing.assert_allclose(
-            fitted["normal_camera"], [0.0, 0.0, -1.0], atol=0.01
+            fitted["normal_camera"], [0.0, 0.0, 1.0], atol=0.01
         )
+        wall_x = np.asarray(fitted["x_axis_camera"])
+        wall_y = np.asarray(fitted["y_axis_camera"])
+        wall_z = np.asarray(fitted["z_axis_camera"])
+        np.testing.assert_allclose(np.cross(wall_x, wall_y), wall_z, atol=1e-8)
+        self.assertLess(wall_z[1], -0.99)
+        self.assertGreater(float(wall_y @ fitted["origin_camera_m"]), 0.0)
+
+    def test_tilted_wall_frame_is_right_handed_and_points_up(self) -> None:
+        rng = np.random.default_rng(8)
+        expected_y = np.array([0.2, 0.1, 0.974679])
+        expected_y /= np.linalg.norm(expected_y)
+        camera_up = np.array([0.0, -1.0, 0.0])
+        expected_z = camera_up - (camera_up @ expected_y) * expected_y
+        expected_z /= np.linalg.norm(expected_z)
+        expected_x = np.cross(expected_y, expected_z)
+        origin = expected_y * 1.2
+        along_x = rng.uniform(-0.5, 0.5, 4_000)
+        along_z = rng.uniform(-0.4, 0.4, 4_000)
+        noise = rng.normal(0.0, 0.001, 4_000)
+        points = (
+            origin
+            + along_x[:, None] * expected_x
+            + along_z[:, None] * expected_z
+            + noise[:, None] * expected_y
+        )
+
+        fitted = fit_dominant_plane(points, threshold_m=0.005, iterations=120)
+        wall_x = np.asarray(fitted["x_axis_camera"])
+        wall_y = np.asarray(fitted["y_axis_camera"])
+        wall_z = np.asarray(fitted["z_axis_camera"])
+        self.assertGreater(float(wall_y @ expected_y), 0.999)
+        self.assertGreater(float(wall_z @ camera_up), 0.99)
+        np.testing.assert_allclose(np.cross(wall_x, wall_y), wall_z, atol=1e-8)
+        fitted_origin = np.asarray(fitted["origin_camera_m"])
+        self.assertAlmostEqual(float(fitted_origin @ wall_x), 0.0, places=8)
+        self.assertAlmostEqual(float(fitted_origin @ wall_z), 0.0, places=8)
 
     def test_annotation_is_replaced_per_frame(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -47,9 +83,10 @@ class AnalysisTests(unittest.TestCase):
             session.close()
             plane = {
                 "origin_camera_m": [0.0, 0.0, 1.0],
-                "normal_camera": [0.0, 0.0, -1.0],
-                "horizontal_axis_camera": [1.0, 0.0, 0.0],
-                "vertical_axis_camera": [0.0, 1.0, 0.0],
+                "normal_camera": [0.0, 0.0, 1.0],
+                "x_axis_camera": [1.0, 0.0, 0.0],
+                "y_axis_camera": [0.0, 0.0, 1.0],
+                "z_axis_camera": [0.0, -1.0, 0.0],
             }
             first = save_annotation(
                 root,
@@ -72,13 +109,18 @@ class AnalysisTests(unittest.TestCase):
                 },
             )
             local = first["target_plane_coordinates_m"]
-            self.assertAlmostEqual(local["horizontal_m"], 0.1)
-            self.assertAlmostEqual(local["vertical_m"], 0.2)
-            self.assertAlmostEqual(local["normal_m"], 0.05)
+            self.assertAlmostEqual(local["x_m"], 0.1)
+            self.assertAlmostEqual(local["y_m"], -0.05)
+            self.assertAlmostEqual(local["z_m"], -0.2)
             relative = first["target_relative_to_semantic_m"]
-            self.assertAlmostEqual(relative["horizontal_m"], 0.02)
-            self.assertAlmostEqual(relative["vertical_m"], 0.02)
-            self.assertAlmostEqual(relative["normal_m"], 0.02)
+            self.assertAlmostEqual(relative["x_m"], 0.02)
+            self.assertAlmostEqual(relative["y_m"], -0.02)
+            self.assertAlmostEqual(relative["z_m"], -0.02)
+            self.assertEqual(first["schema"], "rgbd-target-annotation/v2")
+            self.assertEqual(
+                first["target_adjustment_wall_m"],
+                {"x_m": 0.001, "y_m": 0.003, "z_m": 0.002},
+            )
             self.assertEqual(first["target_pixel"], {"u": 320, "v": 240})
             self.assertEqual(first["selection_source"], "rgb")
             self.assertEqual(
@@ -100,9 +142,10 @@ class AnalysisTests(unittest.TestCase):
     def test_target_plane_coordinates_validates_target(self) -> None:
         plane = {
             "origin_camera_m": [0.0, 0.0, 1.0],
-            "normal_camera": [0.0, 0.0, -1.0],
-            "horizontal_axis_camera": [1.0, 0.0, 0.0],
-            "vertical_axis_camera": [0.0, 1.0, 0.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
         }
         with self.assertRaises(ValueError):
             target_plane_coordinates([0.0, float("nan"), 1.0], plane)
@@ -110,9 +153,10 @@ class AnalysisTests(unittest.TestCase):
     def test_semantic_cluster_prefers_points_in_front_of_plane(self) -> None:
         plane = {
             "origin_camera_m": [0.0, 0.0, 1.0],
-            "normal_camera": [0.0, 0.0, -1.0],
-            "horizontal_axis_camera": [1.0, 0.0, 0.0],
-            "vertical_axis_camera": [0.0, 1.0, 0.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
         }
         background = np.column_stack(
             (
@@ -150,9 +194,10 @@ class AnalysisTests(unittest.TestCase):
     def test_semantic_cluster_uses_instance_polygon(self) -> None:
         plane = {
             "origin_camera_m": [0.0, 0.0, 1.0],
-            "normal_camera": [0.0, 0.0, -1.0],
-            "horizontal_axis_camera": [1.0, 0.0, 0.0],
-            "vertical_axis_camera": [0.0, 1.0, 0.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
         }
         pixels = np.array(
             [[102, 102], [103, 102], [102, 103], [116, 116], [117, 116], [116, 117]],

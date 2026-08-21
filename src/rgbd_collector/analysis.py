@@ -70,7 +70,9 @@ def fit_dominant_plane(
     _, _, vh = np.linalg.svd(inliers - origin, full_matrices=False)
     normal = vh[-1]
     normal /= np.linalg.norm(normal)
-    if normal[2] > 0:
+    # The wall +Y axis points from the camera through the visible wall surface,
+    # i.e. into the wall rather than back toward the camera.
+    if np.dot(normal, origin) < 0:
         normal = -normal
 
     distances = np.abs((fitting_points - origin) @ normal)
@@ -80,31 +82,36 @@ def fit_dominant_plane(
     _, _, vh = np.linalg.svd(inliers - origin, full_matrices=False)
     normal = vh[-1]
     normal /= np.linalg.norm(normal)
-    if normal[2] > 0:
+    if np.dot(normal, origin) < 0:
         normal = -normal
 
-    horizontal = np.array([1.0, 0.0, 0.0])
-    horizontal -= np.dot(horizontal, normal) * normal
-    if np.linalg.norm(horizontal) < 1e-6:
-        horizontal = np.array([0.0, 1.0, 0.0])
-        horizontal -= np.dot(horizontal, normal) * normal
-    horizontal /= np.linalg.norm(horizontal)
-    if horizontal[0] < 0:
-        horizontal = -horizontal
+    wall_y = normal
+    wall_center = origin.copy()
+    camera_up = np.array([0.0, -1.0, 0.0])
+    wall_z = camera_up - np.dot(camera_up, wall_y) * wall_y
+    wall_z_length = np.linalg.norm(wall_z)
+    if wall_z_length < 1e-6:
+        raise ValueError("墙面法向与相机向上方向平行，无法确定墙面 Z 轴")
+    wall_z /= wall_z_length
+    wall_x = np.cross(wall_y, wall_z)
+    wall_x /= np.linalg.norm(wall_x)
+    # Recompute Z to remove numerical non-orthogonality. X × Y = Z.
+    wall_z = np.cross(wall_x, wall_y)
+    wall_z /= np.linalg.norm(wall_z)
 
-    vertical = np.array([0.0, 1.0, 0.0])
-    vertical -= np.dot(vertical, normal) * normal
-    vertical -= np.dot(vertical, horizontal) * horizontal
-    vertical /= np.linalg.norm(vertical)
-    if vertical[1] < 0:
-        vertical = -vertical
-
-    residuals = (inliers - origin) @ normal
+    # Use the camera-origin projection onto the wall as a repeatable frame
+    # origin. The inlier centroid would drift when the visible wall area changes.
+    origin = np.dot(origin, wall_y) * wall_y
+    residuals = (inliers - origin) @ wall_y
     return {
         "origin_camera_m": origin.tolist(),
-        "normal_camera": normal.tolist(),
-        "horizontal_axis_camera": horizontal.tolist(),
-        "vertical_axis_camera": vertical.tolist(),
+        "center_camera_m": wall_center.tolist(),
+        "normal_camera": wall_y.tolist(),
+        "x_axis_camera": wall_x.tolist(),
+        "y_axis_camera": wall_y.tolist(),
+        "z_axis_camera": wall_z.tolist(),
+        "coordinate_system": "wall-right-handed-x-right-y-inward-z-up",
+        "origin_definition": "camera-origin-projection-on-wall",
         "threshold_m": threshold_m,
         "inlier_count": int(inliers.shape[0]),
         "sample_count": int(fitting_points.shape[0]),
@@ -170,8 +177,9 @@ def semantic_clusters(
         intrinsics["cy"]
     )
     origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
-    normal = np.asarray(plane["normal_camera"], dtype=np.float64)
-    protrusion = (points - origin) @ normal
+    _, wall_y, _ = _wall_axes(plane)
+    wall_depth = (points - origin) @ wall_y
+    protrusion = -wall_depth
     shape_value = metadata.get("image_shape")
     image_shape = (
         (int(shape_value[0]), int(shape_value[1]))
@@ -222,16 +230,37 @@ def target_plane_coordinates(
     if target.shape != (3,) or not np.isfinite(target).all():
         raise ValueError("目标点必须是三个有限数值")
     origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
-    horizontal = np.asarray(
-        plane["horizontal_axis_camera"], dtype=np.float64
-    )
-    vertical = np.asarray(plane["vertical_axis_camera"], dtype=np.float64)
-    normal = np.asarray(plane["normal_camera"], dtype=np.float64)
     delta = target - origin
+    return _vector_wall_coordinates(delta, plane)
+
+
+def _wall_axes(
+    plane: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if all(
+        key in plane
+        for key in ("x_axis_camera", "y_axis_camera", "z_axis_camera")
+    ):
+        return tuple(
+            np.asarray(plane[key], dtype=np.float64)
+            for key in ("x_axis_camera", "y_axis_camera", "z_axis_camera")
+        )
+
+    # Read legacy v1 annotations as X=H, Y=-N, Z=-V.
+    horizontal = np.asarray(plane["horizontal_axis_camera"], dtype=np.float64)
+    vertical = np.asarray(plane["vertical_axis_camera"], dtype=np.float64)
+    outward_normal = np.asarray(plane["normal_camera"], dtype=np.float64)
+    return horizontal, -outward_normal, -vertical
+
+
+def _vector_wall_coordinates(
+    vector_camera_m: np.ndarray, plane: dict[str, Any]
+) -> dict[str, float]:
+    wall_x, wall_y, wall_z = _wall_axes(plane)
     return {
-        "horizontal_m": float(delta @ horizontal),
-        "vertical_m": float(delta @ vertical),
-        "normal_m": float(delta @ normal),
+        "x_m": float(vector_camera_m @ wall_x),
+        "y_m": float(vector_camera_m @ wall_y),
+        "z_m": float(vector_camera_m @ wall_z),
     }
 
 
@@ -285,12 +314,13 @@ def save_annotation(
         raise ValueError("目标微调量必须是三个有限数值")
 
     record = {
-        "schema": "rgbd-target-annotation/v1",
+        "schema": "rgbd-target-annotation/v2",
         "session_id": session_id,
         "frame_id": frame_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "target_camera_m": target.tolist(),
         "target_adjustment_camera_m": adjustment.tolist(),
+        "target_adjustment_wall_m": _vector_wall_coordinates(adjustment, plane),
         "selection_source": selection_source,
         "target_plane_coordinates_m": target_plane_coordinates(
             target.tolist(), plane
@@ -319,24 +349,9 @@ def save_annotation(
         )
         delta = target - reference_point
         record["semantic_reference"] = reference
-        record["target_relative_to_semantic_m"] = {
-            "horizontal_m": float(
-                delta
-                @ np.asarray(
-                    plane["horizontal_axis_camera"], dtype=np.float64
-                )
-            ),
-            "vertical_m": float(
-                delta
-                @ np.asarray(
-                    plane["vertical_axis_camera"], dtype=np.float64
-                )
-            ),
-            "normal_m": float(
-                delta
-                @ np.asarray(plane["normal_camera"], dtype=np.float64)
-            ),
-        }
+        record["target_relative_to_semantic_m"] = _vector_wall_coordinates(
+            delta, plane
+        )
 
     path = _annotation_path(data_root, session_id)
     records = load_annotations(data_root, session_id)

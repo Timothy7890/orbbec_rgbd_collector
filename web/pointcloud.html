@@ -61,6 +61,17 @@
       font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
       white-space: pre-wrap; overflow-wrap: anywhere;
     }
+    .pose-metrics {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 7px;
+      margin-top: 10px;
+    }
+    .pose-metric {
+      padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+      background: #0d121a;
+    }
+    .pose-metric span { display: block; color: var(--muted); font-size: 11px; }
+    .pose-metric strong { display: block; margin-top: 2px; font-size: 16px; }
+    .pose-caption { margin: 6px 2px 0; color: var(--muted); font-size: 11px; }
     .stage { position: relative; min-width: 0; background: #040609; }
     canvas { width: 100%; height: 100%; display: block; cursor: grab; }
     canvas:active { cursor: grabbing; }
@@ -259,6 +270,16 @@
       <button id="targetFinderBtn" class="secondary" disabled>算法找点1（Tab）</button>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
+      <div id="cameraPlaneMetrics" class="pose-metrics">
+        <div class="pose-metric"><span>相机到平面垂距</span><strong id="planeDistance">--</strong></div>
+        <div class="pose-metric"><span>总倾角（0°=正对）</span><strong id="planeTilt">--</strong></div>
+        <div class="pose-metric"><span>Yaw 偏差</span><strong id="planeYaw">--</strong></div>
+        <div class="pose-metric"><span>Pitch 偏差</span><strong id="planePitch">--</strong></div>
+      </div>
+      <div id="cameraPlaneNormal" class="pose-caption">等待平面分析</div>
+      <button id="saveAllCameraPlanePosesBtn" class="secondary">
+        一键计算并保存全部帧朝向与距离
+      </button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
       <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系（V）</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
@@ -940,6 +961,90 @@
       return null;
     }
 
+    function cameraPlanePose(plane) {
+      const rawNormal = plane?.normal_camera || plane?.y_axis_camera;
+      const centerPoint = plane?.center_camera_m || plane?.origin_camera_m;
+      if (!Array.isArray(rawNormal) || !Array.isArray(centerPoint)) return null;
+      const length = Math.hypot(...rawNormal);
+      if (!Number.isFinite(length) || length < 1e-9) return null;
+      let normalIntoPlane = rawNormal.map(value => Number(value) / length);
+      if (normalIntoPlane.reduce(
+        (sum, value, index) => sum + value * Number(centerPoint[index]), 0
+      ) < 0) normalIntoPlane = normalIntoPlane.map(value => -value);
+      const normalTowardCamera = normalIntoPlane.map(value => -value);
+      const degrees = radians => radians * 180 / Math.PI;
+      return {
+        distance_m: Math.abs(normalTowardCamera.reduce(
+          (sum, value, index) => sum + value * Number(centerPoint[index]), 0
+        )),
+        yaw_err_deg: degrees(Math.atan2(
+          normalTowardCamera[0], -normalTowardCamera[2]
+        )),
+        pitch_err_deg: degrees(Math.atan2(
+          normalTowardCamera[1], -normalTowardCamera[2]
+        )),
+        tilt_deg: degrees(Math.acos(Math.max(
+          -1, Math.min(1, -normalTowardCamera[2])
+        ))),
+        normal_cam: normalTowardCamera,
+      };
+    }
+
+    function updateCameraPlaneMetrics() {
+      const pose = cameraPlanePose(currentAnalysis?.plane);
+      $("planeDistance").textContent = pose
+        ? `${(pose.distance_m * 1000).toFixed(1)} mm` : "--";
+      $("planeTilt").textContent = pose
+        ? `${pose.tilt_deg.toFixed(2)}°` : "--";
+      $("planeYaw").textContent = pose
+        ? `${pose.yaw_err_deg >= 0 ? "+" : ""}${pose.yaw_err_deg.toFixed(2)}°`
+        : "--";
+      $("planePitch").textContent = pose
+        ? `${pose.pitch_err_deg >= 0 ? "+" : ""}${pose.pitch_err_deg.toFixed(2)}°`
+        : "--";
+      $("cameraPlaneNormal").textContent = pose
+        ? `朝向相机法向量: [${pose.normal_cam.map(value => value.toFixed(4)).join(", ")}]`
+        : "等待平面分析";
+    }
+
+    async function saveAllCameraPlanePoses() {
+      const session = $("session").value;
+      if (!session) throw new Error("请先选择会话");
+      const button = $("saveAllCameraPlanePosesBtn");
+      button.disabled = true;
+      button.textContent = "正在计算全部帧，请稍候…";
+      setStatus(
+        "正在计算并保存全部帧朝向与距离…",
+        false,
+        "逐帧拟合平面，可能需要一些时间"
+      );
+      try {
+        const data = await json(
+          `/api/camera-plane-pose/${encodeURIComponent(session)}/save-all`,
+          {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              plane_threshold_m: Number($("planeThreshold").value) / 1000,
+              min_depth_m: Number($("minDepth").value),
+              max_depth_m: Number($("maxDepth").value),
+              camera_plane_stride: 3,
+              camera_plane_max_points: 60000,
+            }),
+          }
+        );
+        setStatus(
+          "全部帧朝向与距离已保存",
+          data.failure_count > 0,
+          `${data.success_count}/${data.frame_count} 帧成功 · ` +
+          `${data.elapsed_s.toFixed(1)} 秒 · ${data.path}`
+        );
+      } finally {
+        button.disabled = false;
+        button.textContent = "一键计算并保存全部帧朝向与距离";
+      }
+    }
+
     function syncCoordinateFrameButton() {
       const available = Boolean(wallAxes(currentAnalysis?.plane));
       $("coordinateBtn").disabled = !available;
@@ -1188,6 +1293,7 @@
       saved = targetSaved,
       semanticLocal = targetSemanticCoordinates
     ) {
+      updateCameraPlaneMetrics();
       $("saveBtn").disabled = !selectedTarget;
       $("saveBtn").textContent = `保存点位 ${activePointSlot}（C）`;
       const lines = [
@@ -1689,6 +1795,8 @@
       loadCloud({preserveView: true}).catch(e => setStatus(e.message, true));
     };
     $("analyzeBtn").onclick = () => analyzeCurrent().catch(e => setStatus(e.message, true));
+    $("saveAllCameraPlanePosesBtn").onclick = () =>
+      saveAllCameraPlanePoses().catch(e => setStatus(e.message, true));
     $("targetFinderBtn").onclick = () =>
       findPointOne().catch(e => setStatus(e.message, true));
     $("coordinateBtn").onclick = () => {

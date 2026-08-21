@@ -122,6 +122,150 @@ def fit_dominant_plane(
     }
 
 
+def camera_plane_pose_metrics(plane: dict[str, Any]) -> dict[str, Any]:
+    """Match IK_replay's perpendicular-debug camera/plane conventions."""
+    normal_into_plane = np.asarray(
+        plane.get("normal_camera", plane.get("y_axis_camera")),
+        dtype=np.float64,
+    )
+    center = np.asarray(
+        plane.get("center_camera_m", plane.get("origin_camera_m")),
+        dtype=np.float64,
+    )
+    if (
+        normal_into_plane.shape != (3,)
+        or center.shape != (3,)
+        or not np.isfinite(normal_into_plane).all()
+        or not np.isfinite(center).all()
+    ):
+        raise ValueError("平面法向量或中心无效")
+    normal_length = float(np.linalg.norm(normal_into_plane))
+    if normal_length < 1e-9:
+        raise ValueError("平面法向量长度为零")
+    normal_into_plane /= normal_length
+    if float(np.dot(normal_into_plane, center)) < 0:
+        normal_into_plane = -normal_into_plane
+
+    # IK_replay uses a normal pointing back toward the camera. In camera
+    # coordinates x=right, y=down, z=forward; a front-facing plane is
+    # therefore normal_cam=(0, 0, -1), with all three angles equal to zero.
+    normal_toward_camera = -normal_into_plane
+    yaw_err_deg = float(
+        np.degrees(
+            np.arctan2(
+                normal_toward_camera[0], -normal_toward_camera[2]
+            )
+        )
+    )
+    pitch_err_deg = float(
+        np.degrees(
+            np.arctan2(
+                normal_toward_camera[1], -normal_toward_camera[2]
+            )
+        )
+    )
+    tilt_deg = float(
+        np.degrees(
+            np.arccos(np.clip(-normal_toward_camera[2], -1.0, 1.0))
+        )
+    )
+    return {
+        "yaw_err_deg": yaw_err_deg,
+        "pitch_err_deg": pitch_err_deg,
+        "tilt_deg": tilt_deg,
+        "distance_m": float(abs(np.dot(normal_toward_camera, center))),
+        "normal_cam": normal_toward_camera.tolist(),
+        "normal_into_plane_camera": normal_into_plane.tolist(),
+        "plane_center_camera_m": center.tolist(),
+        "convention": "IK_replay-perpendicular-debug",
+    }
+
+
+def measure_frame_camera_plane_pose(
+    data_root: Path,
+    session_id: str,
+    frame_id: str,
+    *,
+    plane_threshold_m: float = 0.008,
+    min_depth_m: float = 0.1,
+    max_depth_m: float = 5.0,
+    stride: int = 3,
+    max_points: int = 60_000,
+) -> dict[str, Any]:
+    cloud, metadata = reconstruct_frame(
+        data_root,
+        session_id,
+        frame_id,
+        stride=stride,
+        min_depth_m=min_depth_m,
+        max_depth_m=max_depth_m,
+        max_points=max_points,
+    )
+    plane = fit_dominant_plane(
+        cloud["xyz"],
+        threshold_m=plane_threshold_m,
+        iterations=100,
+    )
+    return {
+        "session_id": session_id,
+        "frame_id": frame_id,
+        **camera_plane_pose_metrics(plane),
+        "plane_rms_m": plane["rms_m"],
+        "plane_inlier_count": plane["inlier_count"],
+        "plane_inlier_ratio": plane["inlier_ratio"],
+        "fit_point_count": int(cloud.shape[0]),
+        "source_point_count": int(metadata["source_point_count"]),
+        "stride": int(metadata["stride"]),
+        "depth_range_m": metadata["depth_range_m"],
+        "plane_threshold_m": plane_threshold_m,
+    }
+
+
+def save_camera_plane_pose_measurements(
+    data_root: Path,
+    session_id: str,
+    measurements: list[dict[str, Any]],
+    *,
+    options: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    root = data_root.expanduser().resolve()
+    session_dir, _ = resolve_frame_paths(root, session_id, "_validate_")
+    if not session_dir.is_dir():
+        raise FileNotFoundError(f"会话不存在: {session_id}")
+    path = session_dir / "camera_plane_pose_measurements.json"
+    payload = {
+        "schema": "rgbd-camera-plane-pose/v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "definition": {
+            "distance_m": "camera optical center perpendicular distance to plane",
+            "yaw_pitch_tilt": "IK_replay perpendicular-debug convention; zero means camera faces plane normally",
+            "camera_coordinates": "x-right-y-down-z-forward",
+        },
+        "options": options,
+        "frame_count": len(measurements),
+        "success_count": sum(bool(item.get("ok")) for item in measurements),
+        "failure_count": sum(not bool(item.get("ok")) for item in measurements),
+        "frames": measurements,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=".camera-plane-pose-", suffix=".json", dir=session_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+    return path, payload
+
+
 def segment_dominant_planes(
     points_xyz: np.ndarray,
     *,
@@ -738,7 +882,7 @@ def estimate_wall_x_from_p0_boundary_lines(
     fitted_plane: dict[str, Any],
     segmented_planes: list[dict[str, Any]],
     *,
-    max_direction_angle_deg: float = 2.0,
+    max_direction_angle_deg: float = 1.0,
     min_group_line_length_m: float = 0.10,
     min_group_relative_length: float = 0.25,
     min_distinct_planes: int = 2,

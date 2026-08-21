@@ -12,6 +12,7 @@ from rgbd_collector.analysis import (
     apply_wall_calibration,
     build_accepted_wall_calibration,
     build_wall_calibration,
+    camera_plane_pose_metrics,
     describe_p0_boundary_lines,
     describe_segmented_plane_axes,
     estimate_wall_x_from_p0_boundary_lines,
@@ -22,6 +23,7 @@ from rgbd_collector.analysis import (
     load_annotations,
     load_wall_calibration,
     save_annotation,
+    save_camera_plane_pose_measurements,
     save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
     segment_dominant_planes,
@@ -35,6 +37,61 @@ from test_storage import camera_metadata, make_frame
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_camera_plane_pose_matches_ik_perpendicular_convention(self) -> None:
+        front_facing = camera_plane_pose_metrics(
+            {
+                "normal_camera": [0.0, 0.0, 1.0],
+                "center_camera_m": [0.1, -0.1, 0.8],
+            }
+        )
+        self.assertAlmostEqual(front_facing["distance_m"], 0.8)
+        self.assertAlmostEqual(front_facing["yaw_err_deg"], 0.0)
+        self.assertAlmostEqual(front_facing["pitch_err_deg"], 0.0)
+        self.assertAlmostEqual(front_facing["tilt_deg"], 0.0)
+        np.testing.assert_allclose(
+            front_facing["normal_cam"], [0.0, 0.0, -1.0]
+        )
+
+        angle = np.radians(10.0)
+        tilted = camera_plane_pose_metrics(
+            {
+                "normal_camera": [np.sin(angle), 0.0, np.cos(angle)],
+                "center_camera_m": [0.0, 0.0, 0.8],
+            }
+        )
+        self.assertAlmostEqual(tilted["yaw_err_deg"], -10.0)
+        self.assertAlmostEqual(tilted["pitch_err_deg"], 0.0)
+        self.assertAlmostEqual(tilted["tilt_deg"], 10.0)
+
+    def test_camera_plane_pose_batch_payload_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "pose", camera_metadata())
+            session.close()
+            path, payload = save_camera_plane_pose_measurements(
+                root,
+                session.session_id,
+                [
+                    {
+                        "ok": True,
+                        "frame_id": "frame-1",
+                        "distance_m": 0.8,
+                    },
+                    {
+                        "ok": False,
+                        "frame_id": "frame-2",
+                        "error": "fit failed",
+                    },
+                ],
+                options={"stride": 3, "max_points": 60_000},
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["success_count"], 1)
+        self.assertEqual(payload["failure_count"], 1)
+        self.assertEqual(saved["schema"], "rgbd-camera-plane-pose/v1")
+        self.assertEqual(saved["frame_count"], 2)
+
     def test_ransac_finds_plane_with_outliers(self) -> None:
         rng = np.random.default_rng(4)
         x = rng.uniform(-0.5, 0.5, 4_000)
@@ -401,11 +458,11 @@ class AnalysisTests(unittest.TestCase):
             {"index": 1, "boundary_lines": [boundary(0.80, [1.0, 0.0, 0.0])]},
             {
                 "index": 2,
-                "boundary_lines": [boundary(0.70, [1.0, 0.0, 0.01])],
+                "boundary_lines": [boundary(0.70, [1.0, 0.0, 0.005])],
             },
             {
                 "index": 3,
-                "boundary_lines": [boundary(0.60, [1.0, 0.0, -0.015])],
+                "boundary_lines": [boundary(0.60, [1.0, 0.0, -0.006])],
             },
             {"index": 4, "boundary_lines": [boundary(2.00, [0.0, 0.0, 1.0])]},
         ]
@@ -423,6 +480,9 @@ class AnalysisTests(unittest.TestCase):
         )
         self.assertEqual(fitted["axis_reference_plane_index"], 1)
         self.assertEqual(fitted["axis_reference_group_size"], 3)
+        self.assertEqual(
+            fitted["axis_reference_group_angle_tolerance_deg"], 1.0
+        )
         self.assertEqual(
             sum(
                 bool(line.get("selected_for_x"))

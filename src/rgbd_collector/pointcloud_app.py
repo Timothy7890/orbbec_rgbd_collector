@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -13,10 +14,12 @@ from .analysis import (
     apply_wall_calibration,
     build_accepted_wall_calibration,
     build_wall_calibration,
+    measure_frame_camera_plane_pose,
     load_annotations,
     load_wall_calibration,
     reproject_semantic_pointcloud,
     save_annotation,
+    save_camera_plane_pose_measurements,
     save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
     segment_dominant_planes,
@@ -66,6 +69,72 @@ def create_pointcloud_app(
             "ok": True,
             "models": models,
             "default_version": models[-1]["version"],
+        }
+
+    @app.post("/api/camera-plane-pose/{session_id}/save-all")
+    def save_all_camera_plane_poses(
+        session_id: str,
+        body: dict | None = None,
+    ):
+        requested = body or {}
+        options = {
+            "plane_threshold_m": float(
+                requested.get("plane_threshold_m", 0.008)
+            ),
+            "min_depth_m": float(requested.get("min_depth_m", 0.1)),
+            "max_depth_m": float(requested.get("max_depth_m", 5.0)),
+            "stride": int(requested.get("camera_plane_stride", 3)),
+            "max_points": int(
+                requested.get("camera_plane_max_points", 60_000)
+            ),
+        }
+        started = time.perf_counter()
+        try:
+            frames = frame_summaries(root, session_id)
+            measurements: list[dict] = []
+            for frame in frames:
+                frame_id = str(frame["id"])
+                try:
+                    measurement = measure_frame_camera_plane_pose(
+                        root,
+                        session_id,
+                        frame_id,
+                        **options,
+                    )
+                    measurements.append({"ok": True, **measurement})
+                except (
+                    FileNotFoundError,
+                    TypeError,
+                    ValueError,
+                    RuntimeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    measurements.append(
+                        {
+                            "ok": False,
+                            "session_id": session_id,
+                            "frame_id": frame_id,
+                            "error": str(exc),
+                        }
+                    )
+            path, payload = save_camera_plane_pose_measurements(
+                root,
+                session_id,
+                measurements,
+                options=options,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "path": str(path.relative_to(root)),
+            "frame_count": payload["frame_count"],
+            "success_count": payload["success_count"],
+            "failure_count": payload["failure_count"],
+            "elapsed_s": time.perf_counter() - started,
         }
 
     @app.get("/api/sessions")

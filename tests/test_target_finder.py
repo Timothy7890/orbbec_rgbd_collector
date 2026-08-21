@@ -66,6 +66,21 @@ class TargetFinderTests(unittest.TestCase):
         )
         self.assertAlmostEqual(validation["error_distance_m"], 0.004)
 
+    def test_version_0_2_0_uses_34_frame_fixed_offset(self) -> None:
+        models = {model["version"]: model for model in target_finder_models()}
+        prediction = predict_target_one(
+            self.semantic_cloud(), version="0.2.0"
+        )
+        expected_wall = np.array([0.12, -0.01, 0.20]) + np.asarray(
+            models["0.2.0"]["offset_wall_m"]
+        )
+        np.testing.assert_allclose(
+            prediction["target_wall_m"], expected_wall, atol=1e-7
+        )
+        self.assertEqual(prediction["model"]["training_frame_count"], 34)
+        self.assertFalse(prediction["model"]["uses_camera_plane_distance"])
+        self.assertFalse(prediction["model"]["uses_camera_plane_angles"])
+
     def test_unknown_model_version_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "未知找点算法版本"):
             predict_target_one(self.semantic_cloud(), version="9.9.9")

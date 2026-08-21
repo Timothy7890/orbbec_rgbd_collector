@@ -25,7 +25,29 @@ _MODELS: dict[str, dict[str, Any]] = {
             0.0009210491848090602,
         ],
         "validation_note": "训练集内统计；增加独立标注帧后需要重新验证",
-    }
+    },
+    "0.2.0": {
+        "version": "0.2.0",
+        "name": "34帧固定偏移实验版",
+        "algorithm": "highest-confidence-yolo-median-plus-wall-offset",
+        "target_point_slot": 1,
+        "training_session_id": "20260819_153209_capture",
+        "training_frame_range": ["000191", "000224"],
+        "training_frame_count": 34,
+        "offset_wall_m": [
+            0.0433026551380823,
+            0.008997318925539144,
+            -0.015043360249992858,
+        ],
+        "residual_std_wall_m": [
+            0.0036573874529999893,
+            0.001322549069567777,
+            0.0011233245713225825,
+        ],
+        "uses_camera_plane_distance": False,
+        "uses_camera_plane_angles": False,
+        "validation_note": "34帧均经人工调整确认；未使用距离或角度补偿",
+    },
 }
 
 

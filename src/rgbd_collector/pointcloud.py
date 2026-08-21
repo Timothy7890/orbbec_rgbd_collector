@@ -220,6 +220,7 @@ def reconstruct_frame(
     max_depth_m: float = 5.0,
     max_points: int = 200_000,
     boxes: list[dict[str, Any]] | None = None,
+    include_pixels: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if not 1 <= stride <= 64:
         raise ValueError("stride 必须在 1~64")
@@ -283,6 +284,7 @@ def reconstruct_frame(
     v = vv[valid].astype(np.float32)
     z = z[valid]
     rgb = color[vv[valid], uu[valid], ::-1]
+    source_point_count = int(z.size)
 
     if z.size > max_points:
         selected = np.linspace(
@@ -352,6 +354,7 @@ def reconstruct_frame(
         "session_id": session_id,
         "frame_id": frame_id,
         "point_count": int(points.size),
+        "source_point_count": source_point_count,
         "stride": stride,
         "depth_range_m": [min_depth_m, max_depth_m],
         "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
@@ -371,6 +374,10 @@ def reconstruct_frame(
             "radius": radius,
         },
     }
+    if include_pixels:
+        metadata["_pixel_coordinates"] = np.column_stack((u, v)).astype(
+            np.int32
+        )
     return points, metadata
 
 

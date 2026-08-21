@@ -103,6 +103,24 @@
       font: 700 14px/1 sans-serif; paint-order: stroke;
       stroke: rgba(0, 0, 0, .9); stroke-width: 3px; stroke-linejoin: round;
     }
+    .coordinate-frame .automatic-x-line {
+      stroke: #ffe45c; stroke-width: 4; stroke-dasharray: 10 7;
+    }
+    .plane-axes-overlay { z-index: 3; }
+    .plane-axes-overlay .plane-boundary-line {
+      stroke-width: 6; opacity: .95;
+    }
+    .plane-axes-overlay .plane-boundary-line.x-direction-group {
+      stroke: #fff59d; stroke-width: 7;
+    }
+    .plane-axes-overlay .plane-boundary-line.selected-x {
+      stroke: #ffe45c; stroke-width: 8; stroke-dasharray: 12 7;
+    }
+    .plane-axes-overlay .plane-boundary-label.selected-x {
+      fill: #ffe45c; font-size: 15px;
+    }
+    .plane-axes-overlay .plane-boundary-label { font-size: 13px; }
+    .plane-axes-overlay .plane-center-label { font-size: 20px; }
     .calibration-marker {
       position: absolute; z-index: 5; width: 22px; height: 22px;
       border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%);
@@ -204,17 +222,23 @@
       </label>
       <label class="check">
         <input id="planes" type="checkbox">
-        多平面分割着色（试验）
+        多平面分割着色 + 边界线（调试）
       </label>
-      <label>柜面 RANSAC 阈值（mm）
-        <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
-      </label>
+      <div class="row">
+        <label>柜面 RANSAC 阈值（mm）
+          <input id="planeThreshold" type="number" min="1" max="50" step="1" value="8">
+        </label>
+        <label>最少平面点数
+          <input id="minPlanePoints" type="number" min="3" max="200000" step="10" value="300">
+        </label>
+      </div>
       <label>墙面坐标微调步长（mm）
         <input id="nudgeStep" type="number" min="0.1" max="100" step="0.1" value="1">
       </label>
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
+      <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注（C）</button>
@@ -223,7 +247,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后可点击“确认并保存当前坐标系”。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -241,6 +265,8 @@
             <path d="M0,0 L8,4 L0,8 Z" fill="#4d8eff"></path>
           </marker>
         </defs>
+        <line id="automaticXLine" class="automatic-x-line"></line>
+        <text id="automaticXLabel" fill="#ffe45c">自动长轴 X</text>
         <circle id="axisOrigin" r="4" fill="#ffffff"></circle>
         <line id="axisX" stroke="#ff5c5c" marker-end="url(#arrowX)"></line>
         <line id="axisY" stroke="#4dd69a" marker-end="url(#arrowY)"></line>
@@ -249,6 +275,7 @@
         <text id="axisLabelY" fill="#4dd69a">Y</text>
         <text id="axisLabelZ" fill="#4d8eff">Z</text>
       </svg>
+      <svg id="planeAxesOverlay" class="coordinate-frame plane-axes-overlay" hidden></svg>
       <div id="calibrationOriginMarker" class="calibration-marker">O</div>
       <div id="calibrationXMarker" class="calibration-marker x-point">X</div>
       <div id="targetMarker" class="target-marker"></div>
@@ -357,6 +384,7 @@
     let coordinateFrameVisible = true;
     let calibrationMode = false;
     let calibrationPoints = [];
+    let planeAxisOverlays = [];
     let frameLoadToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
 
@@ -424,6 +452,7 @@
       updateSemanticMarkers();
       updateCoordinateFrame();
       updateCalibrationMarkers();
+      updatePlaneAxesOverlay();
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
@@ -489,6 +518,7 @@
         semantic: $("semantic").checked ? "true" : "false",
         planes: $("planes").checked ? "true" : "false",
         plane_threshold_m: Number($("planeThreshold").value) / 1000,
+        min_plane_points: $("minPlanePoints").value,
       });
       const response = await fetch(
         `/api/pointcloud/${encodeURIComponent(session)}/${encodeURIComponent(frame)}?${query}`,
@@ -530,6 +560,7 @@
       syncCoordinateFrameButton();
       syncCalibrationButton();
       rebuildSemanticMarkers();
+      rebuildPlaneAxesOverlay();
       await loadSavedAnnotation(session, frame, loadToken);
       if (loadToken !== frameLoadToken) return;
       if (!$("rgbPicker").hidden) await loadRgbImage();
@@ -542,6 +573,10 @@
         plane_threshold_m: Number($("planeThreshold").value) / 1000,
         min_depth_m: Number($("minDepth").value),
         max_depth_m: Number($("maxDepth").value),
+        stride: Number($("stride").value),
+        max_points: Number($("maxPoints").value),
+        min_plane_points: Number($("minPlanePoints").value),
+        include_plane_debug: $("planes").checked,
       };
     }
 
@@ -549,7 +584,7 @@
       const session = options.session || $("session").value;
       const frame = options.frame || $("frame").value;
       if (!session || !frame) throw new Error("请先选择会话和帧");
-      setStatus("正在执行 YOLO 与柜面拟合…");
+      setStatus("正在加载坐标系与 YOLO…");
       const data = await json(
         `/api/analyze/${encodeURIComponent(session)}/${encodeURIComponent(frame)}`,
         {
@@ -567,10 +602,46 @@
       syncCalibrationButton();
       updateAnalysisPanel();
       rebuildSemanticMarkers();
+      rebuildPlaneAxesOverlay();
       renderRgbOverlay();
-      setStatus("分析完成", false,
-        `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
-        `YOLO ${currentAnalysis.yolo.boxes.length} 个实例`);
+      if (currentAnalysis.plane.plane_analysis_skipped)
+        setStatus(
+          "已加载保存坐标系",
+          false,
+          `已跳过柜面分析 · YOLO ${currentAnalysis.yolo.boxes.length} 个实例`
+        );
+      else
+        setStatus("分析完成", false,
+          `柜面内点 ${(currentAnalysis.plane.inlier_ratio * 100).toFixed(1)}% · ` +
+          `YOLO ${currentAnalysis.yolo.boxes.length} 个实例`);
+    }
+
+    async function acceptCurrentCoordinate() {
+      const session = $("session").value, frame = $("frame").value;
+      const plane = currentAnalysis?.plane;
+      if (!session || !frame || !wallAxes(plane))
+        throw new Error("请先等待当前坐标系分析完成");
+      if (plane.calibrated) return;
+      setStatus("正在保存当前坐标系…");
+      const data = await json(
+        `/api/wall-calibration/${encodeURIComponent(session)}/` +
+        `${encodeURIComponent(frame)}/accept`,
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({plane}),
+        }
+      );
+      if (session !== $("session").value || frame !== $("frame").value) return;
+      currentAnalysis.plane = data.plane;
+      syncCoordinateFrameButton();
+      syncCalibrationButton();
+      updateAnalysisPanel();
+      setStatus(
+        "当前坐标系已确认并保存",
+        false,
+        "下次打开该帧时将优先加载此坐标系"
+      );
     }
 
     async function saveCurrentAnnotation() {
@@ -591,13 +662,16 @@
           }),
         }
       );
+      const existingPlaneSegments = currentAnalysis?.plane_segments || [];
       currentAnalysis = {
         plane: data.annotation.plane,
         yolo: data.annotation.yolo,
+        plane_segments: existingPlaneSegments,
       };
       syncCoordinateFrameButton();
       syncCalibrationButton();
       rebuildSemanticMarkers();
+      rebuildPlaneAxesOverlay();
       selectedTarget = data.annotation.target_camera_m;
       selectedPixel = data.annotation.target_pixel || selectedPixel;
       selectionSource = data.annotation.selection_source || selectionSource;
@@ -649,6 +723,7 @@
       syncCoordinateFrameButton();
       syncCalibrationButton();
       rebuildSemanticMarkers();
+      rebuildPlaneAxesOverlay();
       renderRgbOverlay();
     }
 
@@ -681,6 +756,11 @@
       $("coordinateBtn").textContent = available
         ? (coordinateFrameVisible ? "隐藏坐标系" : "显示坐标系")
         : "坐标系待分析";
+      const alreadySaved = Boolean(currentAnalysis?.plane?.calibrated);
+      $("acceptCoordinateBtn").disabled = !available || alreadySaved;
+      $("acceptCoordinateBtn").textContent = alreadySaved
+        ? "当前坐标系已保存"
+        : "确认并保存当前坐标系";
       if (!available) $("coordinateFrame").hidden = true;
     }
 
@@ -736,6 +816,44 @@
       overlay.setAttribute(
         "viewBox", `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`
       );
+      const automaticLine = $("automaticXLine");
+      const automaticLabel = $("automaticXLabel");
+      const lineStart = plane?.automatic_x_line_start_camera_m;
+      const lineEnd = plane?.automatic_x_line_end_camera_m;
+      const lineStartScreen = Array.isArray(lineStart)
+        ? projectPosition(lineStart, false) : null;
+      const lineEndScreen = Array.isArray(lineEnd)
+        ? projectPosition(lineEnd, false) : null;
+      if (!$("planes").checked &&
+          [
+            "p0-nearest-boundary-line",
+            "secondary-plane-principal-axis",
+            "dominant-plane-principal-axis",
+          ]
+            .includes(plane?.axis_estimation) &&
+          lineStartScreen && lineEndScreen) {
+        automaticLine.style.display = "";
+        automaticLabel.style.display = "";
+        automaticLine.setAttribute("x1", lineStartScreen[0]);
+        automaticLine.setAttribute("y1", lineStartScreen[1]);
+        automaticLine.setAttribute("x2", lineEndScreen[0]);
+        automaticLine.setAttribute("y2", lineEndScreen[1]);
+        automaticLabel.setAttribute(
+          "x", (lineStartScreen[0] + lineEndScreen[0]) / 2 + 8
+        );
+        automaticLabel.setAttribute(
+          "y", (lineStartScreen[1] + lineEndScreen[1]) / 2 - 8
+        );
+        automaticLabel.textContent =
+          plane?.axis_estimation === "p0-nearest-boundary-line"
+            ? `最终 X · P${plane.axis_reference_plane_index} ` +
+              `边${Number(plane.axis_reference_boundary_index) + 1} · ` +
+              `同向${plane.axis_reference_group_line_count}条`
+            : "自动长轴 X";
+      } else {
+        automaticLine.style.display = "none";
+        automaticLabel.style.display = "none";
+      }
       $("axisOrigin").setAttribute("cx", originScreen[0]);
       $("axisOrigin").setAttribute("cy", originScreen[1]);
       ["X", "Y", "Z"].forEach((name, index) => {
@@ -776,6 +894,105 @@
       });
     }
 
+    const planeAxisColors = [
+      "#ef5350", "#42a5f5", "#66bb6a", "#ffca28",
+      "#ab47bc", "#ff7043", "#26c6da", "#8d6e63",
+      "#ec407a", "#7cb342", "#7e57c2", "#ffa726",
+    ];
+
+    function rebuildPlaneAxesOverlay() {
+      const overlay = $("planeAxesOverlay");
+      overlay.replaceChildren();
+      planeAxisOverlays = [];
+      if (!$("planes").checked) {
+        overlay.hidden = true;
+        return;
+      }
+      for (const segment of currentAnalysis?.plane_segments || []) {
+        const color = planeAxisColors[
+          Number(segment.index) % planeAxisColors.length
+        ];
+        const centerLabel = document.createElementNS(
+          "http://www.w3.org/2000/svg", "text"
+        );
+        centerLabel.setAttribute("fill", color);
+        overlay.appendChild(centerLabel);
+        centerLabel.classList.add("plane-center-label");
+        centerLabel.textContent = segment.is_farthest_plane
+          ? "P0 最远整体平面"
+          : `P${segment.index}`;
+        const boundaries = (segment.boundary_lines || []).map(boundary => {
+          const line = document.createElementNS(
+            "http://www.w3.org/2000/svg", "line"
+          );
+          const label = document.createElementNS(
+            "http://www.w3.org/2000/svg", "text"
+          );
+          line.classList.add("plane-boundary-line");
+          label.classList.add("plane-boundary-label");
+          if (boundary.accepted_for_x_group)
+            line.classList.add("x-direction-group");
+          if (boundary.selected_for_x) {
+            line.classList.add("selected-x");
+            label.classList.add("selected-x");
+          }
+          line.setAttribute("stroke", color);
+          label.setAttribute("fill", color);
+          const identity =
+            `P${segment.index} 边${Number(boundary.index) + 1} ` +
+            `${(boundary.length_m * 100).toFixed(0)}cm`;
+          label.textContent = boundary.selected_for_x
+            ? `最终 X · 同向组 · ${identity}` : identity;
+          overlay.appendChild(line);
+          overlay.appendChild(label);
+          return {boundary, line, label};
+        });
+        planeAxisOverlays.push({
+          segment, centerLabel, boundaries,
+        });
+      }
+      overlay.hidden = planeAxisOverlays.length === 0;
+    }
+
+    function updatePlaneAxesOverlay() {
+      const overlay = $("planeAxesOverlay");
+      if (!$("planes").checked || !planeAxisOverlays.length) {
+        overlay.hidden = true;
+        return;
+      }
+      overlay.hidden = false;
+      overlay.setAttribute(
+        "viewBox", `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`
+      );
+      for (const item of planeAxisOverlays) {
+        const center = projectPosition(item.segment.origin_camera_m, false);
+        const visible = Boolean(center);
+        for (const element of [
+          item.centerLabel,
+          ...item.boundaries.flatMap(entry => [entry.line, entry.label]),
+        ]) element.style.display = visible ? "" : "none";
+        if (!visible) continue;
+        item.centerLabel.setAttribute("x", center[0] + 7);
+        item.centerLabel.setAttribute("y", center[1] - 7);
+        for (const entry of item.boundaries) {
+          const start = projectPosition(
+            entry.boundary.start_camera_m, false
+          );
+          const end = projectPosition(entry.boundary.end_camera_m, false);
+          const boundaryVisible = start && end;
+          entry.line.style.display = boundaryVisible ? "" : "none";
+          entry.label.style.display = boundaryVisible ? "" : "none";
+          if (!boundaryVisible) continue;
+          entry.line.setAttribute("x1", start[0]);
+          entry.line.setAttribute("y1", start[1]);
+          entry.line.setAttribute("x2", end[0]);
+          entry.line.setAttribute("y2", end[1]);
+          entry.label.setAttribute("x", end[0] + 6);
+          entry.label.setAttribute("y", end[1] + 14);
+        }
+      }
+    }
+
     function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
       $("saveBtn").disabled = !selectedTarget;
       const lines = [];
@@ -790,13 +1007,35 @@
       if (currentAnalysis?.plane) {
         const p = currentAnalysis.plane;
         const axes = wallAxes(p);
-        if (p.calibrated)
-          lines.push(`坐标系: 已保存标定（基线 ${(p.calibration_baseline_m * 100).toFixed(1)} cm）`);
+        if (p.calibrated && p.calibration_method === "accepted-automatic")
+          lines.push(
+            `坐标系来源: 已确认保存的自动结果（原来源 ` +
+            `${p.accepted_axis_estimation || "未知"}）`
+          );
+        else if (p.calibrated)
+          lines.push(`坐标系来源: 手动逐帧标定（基线 ${(p.calibration_baseline_m * 100).toFixed(1)} cm）`);
+        else if (p.axis_estimation === "p0-nearest-boundary-line")
+          lines.push(
+            `坐标系来源: P0 最近边界最长线（P${p.axis_reference_plane_index} ` +
+            `边${Number(p.axis_reference_boundary_index) + 1}，` +
+            `${(p.axis_reference_line_length_m * 100).toFixed(0)} cm；` +
+            `同向组 ${p.axis_reference_group_size} 个平面/` +
+            `${p.axis_reference_group_line_count} 条线）`
+          );
+        else if (p.axis_estimation === "secondary-plane-principal-axis")
+          lines.push(`坐标系来源: 1·自动窄平面长轴（平面 ${p.axis_reference_plane_index}，长宽比 ${p.axis_shape_anisotropy.toFixed(2)}）`);
+        else if (p.axis_estimation === "dominant-plane-principal-axis")
+          lines.push(`坐标系来源: 旧版自动大平面长轴（长宽比 ${p.axis_shape_anisotropy.toFixed(2)}）`);
+        else if (p.axis_estimation === "multi-plane-intersection")
+          lines.push(`坐标系来源: 2·自动大平面交线（平面夹角 ${p.axis_reference_angle_deg.toFixed(1)}°）`);
         else
-          lines.push("坐标系: 当前帧自动估计");
+          lines.push("坐标系来源: 3·相机方向回退");
         lines.push(`墙面 +Y 法向（相机系）: ${axes[1].map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`墙面 +Z 向上（相机系）: ${axes[2].map(v => v.toFixed(4)).join(", ")}`);
-        lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
+        if (p.plane_analysis_skipped)
+          lines.push("柜面分析: 已跳过（使用保存坐标系）");
+        else
+          lines.push(`内点: ${(p.inlier_ratio * 100).toFixed(1)}%  RMS: ${(p.rms_m * 1000).toFixed(2)} mm`);
       }
       if (currentAnalysis?.yolo) {
         const instances = currentAnalysis.yolo.boxes;
@@ -983,7 +1222,7 @@
         data.point_camera_m.map(value => value.toFixed(4)).join(", ") + " m");
     }
 
-    function projectPosition(point) {
+    function projectPosition(point, clip = true) {
       let x = point[0] - center[0];
       let y = -(point[1] - center[1]);
       let z = -(point[2] - center[2]);
@@ -997,7 +1236,8 @@
       const f = 1.7320508;
       const ndcX = (f * x1 / (canvas.width / canvas.height)) / -z2 + panX;
       const ndcY = (f * y2) / -z2 + panY;
-      if (Math.abs(ndcX) > 1.05 || Math.abs(ndcY) > 1.05) return null;
+      if (clip && (Math.abs(ndcX) > 1.05 || Math.abs(ndcY) > 1.05))
+        return null;
       return [
         (ndcX * 0.5 + 0.5) * canvas.clientWidth,
         (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
@@ -1172,6 +1412,8 @@
       coordinateFrameVisible = !coordinateFrameVisible;
       syncCoordinateFrameButton();
     };
+    $("acceptCoordinateBtn").onclick = () =>
+      acceptCurrentCoordinate().catch(e => setStatus(e.message, true));
     $("calibrateBtn").onclick = toggleCalibrationMode;
     $("rgbPickBtn").onclick = () => openRgbPicker().catch(e => setStatus(e.message, true));
     $("closeRgbBtn").onclick = () => {

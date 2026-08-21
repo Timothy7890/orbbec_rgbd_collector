@@ -7,8 +7,15 @@ from pathlib import Path
 import numpy as np
 
 from rgbd_collector.analysis import (
+    analyze_frame,
     apply_wall_calibration,
+    build_accepted_wall_calibration,
     build_wall_calibration,
+    describe_p0_boundary_lines,
+    describe_segmented_plane_axes,
+    estimate_wall_x_from_p0_boundary_lines,
+    estimate_wall_x_from_plane_intersections,
+    estimate_wall_x_from_secondary_plane_shape,
     fit_dominant_plane,
     load_annotations,
     load_wall_calibration,
@@ -16,6 +23,7 @@ from rgbd_collector.analysis import (
     save_wall_calibration,
     segment_dominant_planes,
     semantic_clusters,
+    split_plane_labels_by_connectivity,
     target_plane_coordinates,
 )
 from rgbd_collector.storage import DatasetSession
@@ -129,6 +137,409 @@ class AnalysisTests(unittest.TestCase):
             int(np.count_nonzero(labels[count * 2 : count * 2 + 180] == -1)),
             160,
         )
+        descriptions = describe_segmented_plane_axes(
+            np.vstack((wall, side, tiny, outliers)), labels, planes
+        )
+        self.assertEqual(len(descriptions), 2)
+        for description in descriptions:
+            self.assertGreater(
+                description["long_length_m"],
+                description["short_length_m"],
+            )
+            long_axis = np.asarray(description["long_axis_camera"])
+            short_axis = np.asarray(description["short_axis_camera"])
+            normal = np.asarray(description["normal_camera"])
+            self.assertAlmostEqual(float(long_axis @ short_axis), 0.0, places=7)
+            self.assertAlmostEqual(float(long_axis @ normal), 0.0, places=7)
+            self.assertAlmostEqual(float(short_axis @ normal), 0.0, places=7)
+
+    def test_two_cuts_create_three_independent_plane_patches(self) -> None:
+        pixel_blocks = []
+        for start_u in (0, 25, 50):
+            uu, vv = np.meshgrid(
+                np.arange(start_u, start_u + 15),
+                np.arange(0, 25),
+            )
+            pixel_blocks.append(np.column_stack((uu.ravel(), vv.ravel())))
+        pixels = np.vstack(pixel_blocks).astype(np.int32)
+        points = np.column_stack(
+            (
+                pixels[:, 0] / 100.0,
+                pixels[:, 1] / 100.0,
+                np.ones(pixels.shape[0]),
+            )
+        )
+        parent_labels = np.zeros(points.shape[0], dtype=np.int32)
+        patch_labels, patches = split_plane_labels_by_connectivity(
+            points,
+            parent_labels,
+            [
+                {
+                    "index": 0,
+                    "origin_camera_m": [0.3, 0.12, 1.0],
+                    "normal_camera": [0.0, 0.0, 1.0],
+                    "inlier_count": points.shape[0],
+                    "inlier_ratio": 1.0,
+                    "rms_m": 0.0,
+                }
+            ],
+            pixels,
+            [40, 80],
+            stride=1,
+            source_point_count=points.shape[0],
+            min_component_count=100,
+        )
+
+        self.assertEqual(len(patches), 3)
+        self.assertEqual(
+            sorted(np.bincount(patch_labels).tolist()), [375, 375, 375]
+        )
+        self.assertTrue(
+            all(patch["parent_plane_index"] == 0 for patch in patches)
+        )
+
+    def test_disconnected_small_patches_are_not_merged_back_together(
+        self,
+    ) -> None:
+        pixel_groups = []
+        for start_u in (0, 30):
+            uu, vv = np.meshgrid(
+                np.arange(start_u, start_u + 10),
+                np.arange(0, 10),
+            )
+            pixel_groups.append(np.column_stack((uu.ravel(), vv.ravel())))
+        pixels = np.vstack(pixel_groups).astype(np.int32)
+        points = np.column_stack(
+            (
+                pixels[:, 0] / 100.0,
+                pixels[:, 1] / 100.0,
+                np.ones(pixels.shape[0]),
+            )
+        )
+        labels, patches = split_plane_labels_by_connectivity(
+            points,
+            np.zeros(points.shape[0], dtype=np.int32),
+            [
+                {
+                    "index": 0,
+                    "origin_camera_m": [0.0, 0.0, 1.0],
+                    "normal_camera": [0.0, 0.0, 1.0],
+                }
+            ],
+            pixels,
+            [20, 50],
+            stride=1,
+            source_point_count=points.shape[0],
+            min_component_count=150,
+            min_component_ratio=0.0,
+        )
+
+        self.assertEqual(patches, [])
+        self.assertTrue(np.all(labels == -1))
+
+    def test_farthest_plane_is_preserved_as_single_p0(self) -> None:
+        pixel_groups = []
+        point_groups = []
+        label_groups = []
+        for depth, parent, start_v in ((2.0, 1, 0), (1.0, 0, 40)):
+            for start_u in (0, 25):
+                uu, vv = np.meshgrid(
+                    np.arange(start_u, start_u + 15),
+                    np.arange(start_v, start_v + 20),
+                )
+                pixels = np.column_stack((uu.ravel(), vv.ravel()))
+                pixel_groups.append(pixels)
+                point_groups.append(
+                    np.column_stack(
+                        (
+                            pixels[:, 0] / 100.0,
+                            pixels[:, 1] / 100.0,
+                            np.full(pixels.shape[0], depth),
+                        )
+                    )
+                )
+                label_groups.append(
+                    np.full(pixels.shape[0], parent, dtype=np.int32)
+                )
+        pixels = np.vstack(pixel_groups).astype(np.int32)
+        points = np.vstack(point_groups)
+        parent_labels = np.concatenate(label_groups)
+        patch_labels, patches = split_plane_labels_by_connectivity(
+            points,
+            parent_labels,
+            [
+                {"index": 0, "normal_camera": [0.0, 0.0, 1.0]},
+                {"index": 1, "normal_camera": [0.0, 0.0, 1.0]},
+            ],
+            pixels,
+            [80, 60],
+            stride=1,
+            source_point_count=points.shape[0],
+            min_component_count=100,
+            preserve_farthest_plane=True,
+        )
+
+        self.assertEqual(len(patches), 3)
+        self.assertEqual(patches[0]["index"], 0)
+        self.assertEqual(patches[0]["parent_plane_index"], 1)
+        self.assertTrue(patches[0]["is_farthest_plane"])
+        self.assertEqual(int(np.count_nonzero(patch_labels == 0)), 600)
+        self.assertTrue(
+            all(not patch["is_farthest_plane"] for patch in patches[1:])
+        )
+
+        filtered_labels, filtered_patches = split_plane_labels_by_connectivity(
+            points,
+            parent_labels,
+            [
+                {"index": 0, "normal_camera": [0.0, 0.0, 1.0]},
+                {"index": 1, "normal_camera": [0.0, 0.0, 1.0]},
+            ],
+            pixels,
+            [80, 60],
+            stride=1,
+            source_point_count=points.shape[0],
+            min_component_count=100,
+            preserve_farthest_plane=True,
+            max_planar_point_distance_from_farthest_plane_m=0.010,
+        )
+
+        self.assertEqual(len(filtered_patches), 1)
+        self.assertTrue(filtered_patches[0]["is_farthest_plane"])
+        self.assertAlmostEqual(
+            filtered_patches[0]["nearest_p0_xz_distance_m"], 0.0
+        )
+        self.assertTrue(np.all(filtered_labels[parent_labels == 0] == -1))
+
+    def test_multiple_long_boundaries_are_fitted_next_to_p0(self) -> None:
+        positions = np.linspace(-0.15, 0.15, 301)
+        p0_points = np.vstack(
+            (
+                np.column_stack(
+                    (positions, np.zeros_like(positions), np.zeros_like(positions))
+                ),
+                np.column_stack(
+                    (np.zeros_like(positions), np.zeros_like(positions), positions)
+                ),
+            )
+        )
+        neighboring_points = np.vstack(
+            (
+                np.column_stack(
+                    (
+                        positions,
+                        np.full_like(positions, -0.02),
+                        np.full_like(positions, 0.006),
+                    )
+                ),
+                np.column_stack(
+                    (
+                        np.full_like(positions, 0.006),
+                        np.full_like(positions, -0.02),
+                        positions,
+                    )
+                ),
+            )
+        )
+        points = np.vstack((p0_points, neighboring_points))
+        labels = np.concatenate(
+            (
+                np.zeros(p0_points.shape[0], dtype=np.int32),
+                np.ones(neighboring_points.shape[0], dtype=np.int32),
+            )
+        )
+        described = describe_p0_boundary_lines(
+            points,
+            labels,
+            [
+                {
+                    "index": 0,
+                    "is_farthest_plane": True,
+                    "origin_camera_m": [0.0, 0.0, 0.0],
+                    "normal_camera": [0.0, 1.0, 0.0],
+                },
+                {
+                    "index": 1,
+                    "is_farthest_plane": False,
+                    "origin_camera_m": [0.0, -0.02, 0.0],
+                    "normal_camera": [0.0, 1.0, 0.0],
+                },
+            ],
+        )
+
+        lines = described[1]["boundary_lines"]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(line["length_m"] > 0.25 for line in lines))
+        directions = [
+            np.asarray(line["direction_camera"], dtype=np.float64)
+            for line in lines
+        ]
+        self.assertLess(abs(float(directions[0] @ directions[1])), 0.1)
+
+    def test_isolated_longest_boundary_is_rejected_for_direction_group(
+        self,
+    ) -> None:
+        def boundary(
+            length: float, direction: list[float]
+        ) -> dict[str, object]:
+            vector = np.asarray(direction, dtype=np.float64)
+            vector /= np.linalg.norm(vector)
+            return {
+                "index": 0,
+                "start_camera_m": (-0.5 * length * vector).tolist(),
+                "end_camera_m": (0.5 * length * vector).tolist(),
+                "direction_camera": vector.tolist(),
+                "length_m": length,
+                "fit_method": "ransac",
+            }
+
+        segments = [
+            {"index": 0, "boundary_lines": []},
+            {"index": 1, "boundary_lines": [boundary(0.80, [1.0, 0.0, 0.0])]},
+            {
+                "index": 2,
+                "boundary_lines": [boundary(0.70, [1.0, 0.0, 0.01])],
+            },
+            {
+                "index": 3,
+                "boundary_lines": [boundary(0.60, [1.0, 0.0, -0.015])],
+            },
+            {"index": 4, "boundary_lines": [boundary(2.00, [0.0, 0.0, 1.0])]},
+        ]
+        fitted = estimate_wall_x_from_p0_boundary_lines(
+            {
+                "x_axis_camera": [1.0, 0.0, 0.0],
+                "y_axis_camera": [0.0, 1.0, 0.0],
+                "z_axis_camera": [0.0, 0.0, 1.0],
+                "axis_estimation": "camera-up-projection",
+            },
+            segments,
+        )
+        self.assertEqual(
+            fitted["axis_estimation"], "p0-nearest-boundary-line"
+        )
+        self.assertEqual(fitted["axis_reference_plane_index"], 1)
+        self.assertEqual(fitted["axis_reference_group_size"], 3)
+        self.assertEqual(
+            sum(
+                bool(line.get("selected_for_x"))
+                for segment in segments
+                for line in segment["boundary_lines"]
+            ),
+            1,
+        )
+        self.assertFalse(
+            segments[4]["boundary_lines"][0]["accepted_for_x_group"]
+        )
+
+    def test_plane_intersection_defines_automatic_wall_x(self) -> None:
+        fitted = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "x_axis_camera": [0.98, 0.2, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.2, -0.98, 0.0],
+            "axis_estimation": "camera-up-projection",
+        }
+        angle = np.radians(5.0)
+        result = estimate_wall_x_from_plane_intersections(
+            fitted,
+            [
+                {
+                    "index": 1,
+                    "normal_camera": [0.0, np.sin(angle), np.cos(angle)],
+                    "inlier_ratio": 0.2,
+                }
+            ],
+        )
+
+        np.testing.assert_allclose(
+            result["x_axis_camera"], [1.0, 0.0, 0.0], atol=1e-8
+        )
+        np.testing.assert_allclose(
+            result["z_axis_camera"], [0.0, -1.0, 0.0], atol=1e-8
+        )
+        self.assertEqual(result["axis_estimation"], "multi-plane-intersection")
+        self.assertAlmostEqual(result["axis_reference_angle_deg"], 5.0)
+
+    def test_secondary_narrow_plane_defines_automatic_wall_x(self) -> None:
+        rng = np.random.default_rng(21)
+        angle = np.radians(10.0)
+        expected_x = np.array([np.cos(angle), -np.sin(angle), 0.0])
+        wall_y = np.array([0.0, 0.0, 1.0])
+        tilt = np.radians(5.0)
+        secondary_normal = (
+            wall_y * np.cos(tilt)
+            + np.cross(expected_x, wall_y) * np.sin(tilt)
+        )
+        secondary_width = np.cross(secondary_normal, expected_x)
+        secondary_width /= np.linalg.norm(secondary_width)
+        main_points = np.column_stack(
+            (
+                rng.uniform(-0.8, 0.8, 2_000),
+                rng.uniform(-0.5, 0.5, 2_000),
+                np.full(2_000, 1.2),
+            )
+        )
+        secondary_points = (
+            np.array([0.0, 0.0, 1.15])
+            + rng.uniform(-0.7, 0.7, (800, 1)) * expected_x
+            + rng.uniform(-0.08, 0.08, (800, 1)) * secondary_width
+        )
+        points = np.vstack((main_points, secondary_points))
+        labels = np.concatenate(
+            (
+                np.zeros(main_points.shape[0], dtype=np.int32),
+                np.ones(secondary_points.shape[0], dtype=np.int32),
+            )
+        )
+        fitted = {
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": wall_y.tolist(),
+            "z_axis_camera": [0.0, -1.0, 0.0],
+            "axis_estimation": "camera-up-projection",
+        }
+        result = estimate_wall_x_from_secondary_plane_shape(
+            fitted,
+            points,
+            labels,
+            [
+                {"index": 0, "normal_camera": wall_y, "inlier_ratio": 0.7},
+                {
+                    "index": 1,
+                    "normal_camera": secondary_normal,
+                    "inlier_ratio": 0.3,
+                },
+            ],
+        )
+
+        np.testing.assert_allclose(
+            result["x_axis_camera"], expected_x, atol=0.01
+        )
+        self.assertEqual(
+            result["axis_estimation"], "secondary-plane-principal-axis"
+        )
+        self.assertEqual(result["axis_reference_plane_index"], 1)
+
+    def test_automatic_wall_x_falls_back_without_reliable_intersection(
+        self,
+    ) -> None:
+        fitted = {
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+            "axis_estimation": "camera-up-projection",
+        }
+        result = estimate_wall_x_from_plane_intersections(
+            fitted,
+            [
+                {
+                    "index": 1,
+                    "normal_camera": [0.0, 0.01, 0.99995],
+                    "inlier_ratio": 0.3,
+                }
+            ],
+        )
+        self.assertEqual(result, fitted)
 
     def test_annotation_is_replaced_per_frame(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -238,6 +649,9 @@ class AnalysisTests(unittest.TestCase):
 
         applied = apply_wall_calibration(plane, calibration)
         self.assertTrue(applied["calibrated"])
+        self.assertEqual(
+            applied["axis_estimation"], "manual-two-point-calibration"
+        )
         self.assertEqual(applied["center_camera_m"], plane["center_camera_m"])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -276,6 +690,68 @@ class AnalysisTests(unittest.TestCase):
                 [0.0, 0.0, 1.0],
                 [0.0, -0.02, 1.0],
             )
+
+    def test_current_automatic_coordinate_can_be_accepted(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+            "axis_estimation": "p0-nearest-boundary-line",
+            "axis_reference_plane_index": 5,
+            "axis_reference_boundary_index": 0,
+            "axis_reference_line_length_m": 1.74,
+        }
+        calibration = build_accepted_wall_calibration(plane)
+        self.assertEqual(
+            calibration["calibration_method"], "accepted-automatic"
+        )
+        self.assertEqual(
+            calibration["accepted_axis_estimation"],
+            "p0-nearest-boundary-line",
+        )
+        applied = apply_wall_calibration(plane, calibration)
+        self.assertTrue(applied["calibrated"])
+        self.assertEqual(
+            applied["axis_estimation"], "saved-accepted-coordinate"
+        )
+        self.assertEqual(applied["axis_reference_plane_index"], 5)
+
+    def test_saved_coordinate_skips_plane_analysis(self) -> None:
+        plane = {
+            "origin_camera_m": [0.0, 0.0, 1.0],
+            "center_camera_m": [0.0, 0.0, 1.0],
+            "normal_camera": [0.0, 0.0, 1.0],
+            "x_axis_camera": [1.0, 0.0, 0.0],
+            "y_axis_camera": [0.0, 0.0, 1.0],
+            "z_axis_camera": [0.0, -1.0, 0.0],
+            "axis_estimation": "p0-nearest-boundary-line",
+            "threshold_m": 0.008,
+            "inlier_count": 42,
+            "inlier_ratio": 1.0,
+            "rms_m": 0.001,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "saved", camera_metadata())
+            frame_id = session.enqueue(make_frame(1), "manual")
+            session.close()
+            calibration = build_accepted_wall_calibration(plane)
+            save_wall_calibration(
+                root, session.session_id, frame_id, calibration
+            )
+
+            result = analyze_frame(
+                root,
+                session.session_id,
+                frame_id,
+                min_plane_points=3,
+            )
+
+        self.assertTrue(result["plane"]["plane_analysis_skipped"])
+        self.assertEqual(result["plane_segments"], [])
+        self.assertEqual(result["plane"]["inlier_count"], 42)
 
     def test_semantic_cluster_prefers_points_in_front_of_plane(self) -> None:
         plane = {

@@ -9,12 +9,14 @@ from fastapi.responses import FileResponse, Response
 from .analysis import (
     analyze_frame,
     apply_wall_calibration,
+    build_accepted_wall_calibration,
     build_wall_calibration,
     load_annotations,
     load_wall_calibration,
     save_annotation,
     save_wall_calibration,
     segment_dominant_planes,
+    split_plane_labels_by_connectivity,
 )
 from .offline_yolo import OfflineYolo
 from .pointcloud import (
@@ -118,6 +120,7 @@ def create_pointcloud_app(
         semantic: bool = Query(default=False),
         planes: bool = Query(default=False),
         plane_threshold_m: float = Query(default=0.008, ge=0.001, le=0.05),
+        min_plane_points: int = Query(default=300, ge=3, le=200_000),
     ):
         try:
             boxes = None
@@ -132,11 +135,26 @@ def create_pointcloud_app(
                 max_depth_m=max_depth_m,
                 max_points=max_points,
                 boxes=boxes,
+                include_pixels=planes,
             )
             segmented_planes: list[dict] = []
             if planes:
+                pixel_coordinates = metadata.pop("_pixel_coordinates")
                 labels, segmented_planes = segment_dominant_planes(
                     points["xyz"], threshold_m=plane_threshold_m
+                )
+                labels, segmented_planes = split_plane_labels_by_connectivity(
+                    points["xyz"],
+                    labels,
+                    segmented_planes,
+                    pixel_coordinates,
+                    metadata["image_shape"],
+                    stride=stride,
+                    source_point_count=int(metadata["source_point_count"]),
+                    min_component_count=min_plane_points,
+                    min_component_ratio=0.0,
+                    preserve_farthest_plane=True,
+                    max_planar_point_distance_from_farthest_plane_m=0.010,
                 )
                 point_counts = apply_plane_segment_colors(points, labels)
                 metadata["plane_segmentation"] = {
@@ -189,6 +207,12 @@ def create_pointcloud_app(
                 ),
                 min_depth_m=float(options.get("min_depth_m", 0.15)),
                 max_depth_m=float(options.get("max_depth_m", 3.0)),
+                stride=int(options.get("stride", 3)),
+                max_points=int(options.get("max_points", 120_000)),
+                min_plane_points=int(options.get("min_plane_points", 300)),
+                include_plane_debug=bool(
+                    options.get("include_plane_debug", False)
+                ),
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -232,6 +256,9 @@ def create_pointcloud_app(
                 ),
                 min_depth_m=float(body.get("min_depth_m", 0.15)),
                 max_depth_m=float(body.get("max_depth_m", 3.0)),
+                stride=int(body.get("stride", 3)),
+                max_points=int(body.get("max_points", 120_000)),
+                min_plane_points=int(body.get("min_plane_points", 300)),
                 use_saved_wall_calibration=False,
             )
             calibration = build_wall_calibration(
@@ -269,6 +296,39 @@ def create_pointcloud_app(
             "path": str(path),
         }
 
+    @app.post("/api/wall-calibration/{session_id}/{frame_id}/accept")
+    def accept_wall_calibration(
+        session_id: str,
+        frame_id: str,
+        body: dict,
+    ):
+        try:
+            current_plane = dict(body["plane"])
+            calibration = build_accepted_wall_calibration(current_plane)
+            calibration["source"] = {
+                "session_id": session_id,
+                "frame_id": frame_id,
+                "accepted_from": calibration["accepted_axis_estimation"],
+            }
+            path = save_wall_calibration(
+                root, session_id, frame_id, calibration
+            )
+            plane = apply_wall_calibration(current_plane, calibration)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"缺少字段: {exc.args[0]}"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "calibration": calibration,
+            "plane": plane,
+            "path": str(path),
+        }
+
     @app.post("/api/annotations/{session_id}/{frame_id}")
     def annotate(
         session_id: str,
@@ -292,6 +352,9 @@ def create_pointcloud_app(
                 ),
                 min_depth_m=float(body.get("min_depth_m", 0.15)),
                 max_depth_m=float(body.get("max_depth_m", 3.0)),
+                stride=int(body.get("stride", 3)),
+                max_points=int(body.get("max_points", 120_000)),
+                min_plane_points=int(body.get("min_plane_points", 300)),
             )
             record = save_annotation(
                 root,

@@ -78,6 +78,14 @@
     .target-marker.saved-target {
       background: var(--green); box-shadow: 0 0 0 3px rgba(77,214,154,.28);
     }
+    .point-slot-marker {
+      position: absolute; z-index: 4; width: 20px; height: 20px;
+      border: 2px solid white; border-radius: 50%;
+      transform: translate(-50%, -50%); pointer-events: none;
+      color: white; text-align: center; font: 700 11px/16px sans-serif;
+      box-shadow: 0 0 0 3px rgba(255,255,255,.18);
+    }
+    .point-slot-marker.unsaved { border-style: dashed; opacity: .8; }
     .target-marker::after {
       content: attr(data-label); position: absolute; left: 50%; bottom: 22px;
       transform: translateX(-50%); padding: 3px 7px; border-radius: 5px;
@@ -241,13 +249,13 @@
       <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系（V）</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
-      <button id="saveBtn" class="secondary" disabled>保存当前标注（C）</button>
+      <button id="saveBtn" class="secondary" disabled>保存点位 1（C）</button>
       <button id="refreshBtn" class="secondary">刷新拍摄目录</button>
       <button id="resetBtn" class="secondary">重置视角</button>
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；数字 1–9 切换点位槽，点位 1 兼容原有标注，按 0 显示/隐藏当前帧全部点位，按 C 保存当前点位。每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -279,6 +287,7 @@
       <div id="calibrationOriginMarker" class="calibration-marker">O</div>
       <div id="calibrationXMarker" class="calibration-marker x-point">X</div>
       <div id="targetMarker" class="target-marker"></div>
+      <div id="pointSlotMarkers"></div>
       <div id="semanticMarkers"></div>
       <div id="rgbPicker" class="rgb-picker" hidden>
         <div class="rgb-head">
@@ -379,6 +388,12 @@
     let selectedPixel = null, selectionSource = "pointcloud";
     let targetAdjustment = [0, 0, 0];
     let targetSaved = false;
+    let targetPlaneCoordinates = null;
+    let targetSemanticCoordinates = null;
+    let activePointSlot = 1;
+    let pointSlotStates = {};
+    let allPointSlotsVisible = false;
+    let pointSlotMarkers = [];
     let selectionArmed = true;
     let semanticMarkers = [];
     let coordinateFrameVisible = true;
@@ -387,6 +402,60 @@
     let planeAxisOverlays = [];
     let frameLoadToken = 0;
     const selectionStorageKey = "rgbd-pointcloud-selection";
+
+    function initializePointSlotMarkers() {
+      const container = $("pointSlotMarkers");
+      container.replaceChildren();
+      pointSlotMarkers = [];
+      for (let slot = 1; slot <= 9; slot++) {
+        const element = document.createElement("div");
+        element.className = "point-slot-marker";
+        element.textContent = String(slot);
+        element.style.background = `hsl(${(slot - 1) * 40} 70% 42%)`;
+        container.appendChild(element);
+        pointSlotMarkers.push({slot, element});
+      }
+    }
+    initializePointSlotMarkers();
+
+    function rememberActivePointState() {
+      if (!selectedTarget) return;
+      pointSlotStates[String(activePointSlot)] = {
+        target: [...selectedTarget],
+        pixel: selectedPixel ? {...selectedPixel} : null,
+        source: selectionSource,
+        adjustment: [...targetAdjustment],
+        saved: targetSaved,
+        planeCoordinates: targetPlaneCoordinates,
+        semanticCoordinates: targetSemanticCoordinates,
+      };
+    }
+
+    function activatePointSlot(slot, announce = true) {
+      rememberActivePointState();
+      activePointSlot = slot;
+      const state = pointSlotStates[String(slot)];
+      selectedTarget = state?.target ? [...state.target] : null;
+      selectedPixel = state?.pixel ? {...state.pixel} : null;
+      selectionSource = state?.source || "pointcloud";
+      targetAdjustment = state?.adjustment
+        ? [...state.adjustment] : [0, 0, 0];
+      targetSaved = Boolean(state?.saved);
+      targetPlaneCoordinates = state?.planeCoordinates || null;
+      targetSemanticCoordinates = state?.semanticCoordinates || null;
+      selectionArmed = !selectedTarget;
+      if (selectedTarget) focusOrbitOn(selectedTarget);
+      updateAnalysisPanel();
+      renderRgbOverlay();
+      if (announce)
+        setStatus(
+          `当前点位 ${slot}`,
+          false,
+          selectedTarget
+            ? (targetSaved ? "已加载保存点" : "有未保存修改")
+            : "请选择三维目标后按 C 保存"
+        );
+    }
 
     function savedSelection() {
       try {
@@ -449,6 +518,7 @@
         gl.drawArrays(gl.POINTS, 0, pointCount);
       }
       updateTargetMarker();
+      updatePointSlotMarkers();
       updateSemanticMarkers();
       updateCoordinateFrame();
       updateCalibrationMarkers();
@@ -553,6 +623,10 @@
       selectionSource = "pointcloud";
       targetAdjustment = [0, 0, 0];
       targetSaved = false;
+      targetPlaneCoordinates = null;
+      targetSemanticCoordinates = null;
+      activePointSlot = 1;
+      pointSlotStates = {};
       currentAnalysis = null;
       selectionArmed = true;
       calibrationMode = false;
@@ -659,6 +733,7 @@
             target_pixel: selectedPixel,
             selection_source: selectionSource,
             target_adjustment_camera_m: targetAdjustment,
+            point_slot: activePointSlot,
           }),
         }
       );
@@ -679,14 +754,14 @@
       selectionArmed = false;
       targetAdjustment =
         data.annotation.target_adjustment_camera_m || targetAdjustment;
-      updateAnalysisPanel(
-        data.annotation.target_plane_coordinates_m,
-        true,
-        data.annotation.target_relative_to_semantic_m
-      );
+      targetPlaneCoordinates = data.annotation.target_plane_coordinates_m;
+      targetSemanticCoordinates =
+        data.annotation.target_relative_to_semantic_m || null;
+      rememberActivePointState();
+      updateAnalysisPanel();
       const savedCloud = data.annotation.yolo?.saved_pointcloud;
       setStatus(
-        "标注已保存",
+        `点位 ${activePointSlot} 已保存`,
         false,
         savedCloud
           ? `最高置信度 YOLO 点云 ${savedCloud.point_count.toLocaleString()} 点`
@@ -708,22 +783,35 @@
         return;
       const saved = (data.annotations || []).find(item => item.frame_id === frame);
       if (saved) {
-        selectedTarget = saved.target_camera_m;
-        focusOrbitOn(selectedTarget);
-        selectedPixel = saved.target_pixel || null;
-        selectionSource = saved.selection_source || "pointcloud";
-        targetSaved = true;
-        targetAdjustment =
-          saved.target_adjustment_camera_m || [0, 0, 0];
+        const savedPoints = saved.points && typeof saved.points === "object"
+          ? saved.points : {"1": saved};
+        pointSlotStates = {};
+        for (const [slot, point] of Object.entries(savedPoints)) {
+          if (!Array.isArray(point.target_camera_m)) continue;
+          pointSlotStates[slot] = {
+            target: point.target_camera_m,
+            pixel: point.target_pixel || null,
+            source: point.selection_source || "pointcloud",
+            adjustment: point.target_adjustment_camera_m || [0, 0, 0],
+            saved: true,
+            planeCoordinates: point.target_plane_coordinates_m || null,
+            semanticCoordinates:
+              point.target_relative_to_semantic_m || null,
+          };
+        }
         currentAnalysis = {plane: saved.plane, yolo: saved.yolo};
-        selectionArmed = false;
-        updateAnalysisPanel(
-          saved.target_plane_coordinates_m,
-          true,
-          saved.target_relative_to_semantic_m
-        );
+        activePointSlot = 1;
+        activatePointSlot(1, false);
       } else {
+        pointSlotStates = {};
+        activePointSlot = 1;
+        selectedTarget = null;
+        selectedPixel = null;
+        selectionSource = "pointcloud";
+        targetAdjustment = [0, 0, 0];
         targetSaved = false;
+        targetPlaneCoordinates = null;
+        targetSemanticCoordinates = null;
         selectionArmed = true;
         updateAnalysisPanel();
       }
@@ -1000,9 +1088,17 @@
       }
     }
 
-    function updateAnalysisPanel(local = null, saved = false, semanticLocal = null) {
+    function updateAnalysisPanel(
+      local = targetPlaneCoordinates,
+      saved = targetSaved,
+      semanticLocal = targetSemanticCoordinates
+    ) {
       $("saveBtn").disabled = !selectedTarget;
-      const lines = [];
+      $("saveBtn").textContent = `保存点位 ${activePointSlot}（C）`;
+      const lines = [
+        `当前点位: ${activePointSlot}`,
+        `全部点位显示: ${allPointSlotsVisible ? "开" : "关"}（0）`,
+      ];
       if (selectedTarget) {
         lines.push(`目标相机系 m: ${selectedTarget.map(v => v.toFixed(4)).join(", ")}`);
         lines.push(`选点来源: ${selectionSource === "rgb" ? "RGB 像素" : "三维点云"}`);
@@ -1225,6 +1321,8 @@
       selectionSource = "rgb";
       targetSaved = false;
       targetAdjustment = [0, 0, 0];
+      targetPlaneCoordinates = null;
+      targetSemanticCoordinates = null;
       selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -1295,6 +1393,8 @@
       selectionSource = "pointcloud";
       targetSaved = false;
       targetAdjustment = [0, 0, 0];
+      targetPlaneCoordinates = null;
+      targetSemanticCoordinates = null;
       selectionArmed = false;
       updateAnalysisPanel();
       renderRgbOverlay();
@@ -1315,10 +1415,31 @@
       marker.style.display = "block";
       marker.classList.toggle("saved-target", targetSaved);
       marker.dataset.label = selectionArmed
-        ? "重新选点已解锁"
-        : (targetSaved ? "已保存点 · 已锁定" : "当前点 · 已锁定");
+        ? `点位 ${activePointSlot} · 重新选点已解锁`
+        : (targetSaved
+          ? `点位 ${activePointSlot} · 已保存 · 已锁定`
+          : `点位 ${activePointSlot} · 未保存 · 已锁定`);
       marker.style.left = `${position[0]}px`;
       marker.style.top = `${position[1]}px`;
+    }
+
+    function updatePointSlotMarkers() {
+      for (const marker of pointSlotMarkers) {
+        if (!allPointSlotsVisible || marker.slot === activePointSlot) {
+          marker.element.style.display = "none";
+          continue;
+        }
+        const state = pointSlotStates[String(marker.slot)];
+        const position = state?.target
+          ? projectPosition(state.target) : null;
+        marker.element.style.display = position ? "block" : "none";
+        if (!position) continue;
+        marker.element.classList.toggle("unsaved", !state.saved);
+        marker.element.style.left = `${position[0]}px`;
+        marker.element.style.top = `${position[1]}px`;
+        marker.element.title =
+          `点位 ${marker.slot}${state.saved ? " · 已保存" : " · 未保存"}`;
+      }
     }
 
     function rebuildSemanticMarkers() {
@@ -1380,6 +1501,8 @@
       selectedTarget = next;
       focusOrbitOn(selectedTarget);
       targetSaved = false;
+      targetPlaneCoordinates = null;
+      targetSemanticCoordinates = null;
       targetAdjustment = targetAdjustment.map(
         (value, index) => value + cameraDelta[index]
       );
@@ -1466,6 +1589,33 @@
       const target = event.target;
       if (target instanceof HTMLElement &&
           (target.matches("input, textarea") || target.isContentEditable)) return;
+      if (event.code === "Digit0" || event.code === "Numpad0") {
+        if (!event.repeat) {
+          allPointSlotsVisible = !allPointSlotsVisible;
+          const visibleSlots = new Set(
+            Object.entries(pointSlotStates)
+              .filter(([, state]) => Array.isArray(state?.target))
+              .map(([slot]) => slot)
+          );
+          if (selectedTarget) visibleSlots.add(String(activePointSlot));
+          updateAnalysisPanel();
+          setStatus(
+            allPointSlotsVisible ? "已显示全部点位" : "已隐藏其他点位",
+            false,
+            allPointSlotsVisible
+              ? `当前帧共 ${visibleSlots.size} 个点位`
+              : `仅显示活动点位 ${activePointSlot}`
+          );
+        }
+        event.preventDefault();
+        return;
+      }
+      const pointSlotMatch = event.code.match(/^(?:Digit|Numpad)([1-9])$/);
+      if (pointSlotMatch) {
+        if (!event.repeat) activatePointSlot(Number(pointSlotMatch[1]));
+        event.preventDefault();
+        return;
+      }
       if (event.code === "KeyR") {
         if (!event.repeat) {
           selectionArmed = true;

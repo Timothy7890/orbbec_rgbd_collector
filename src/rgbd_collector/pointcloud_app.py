@@ -338,6 +338,7 @@ def create_pointcloud_app(
     ):
         try:
             target = [float(value) for value in body["target_camera_m"]]
+            point_slot = int(body.get("point_slot", 1))
             boxes = (
                 detector.infer_frame(root, session_id, frame_id)
                 if detector.enabled
@@ -369,6 +370,7 @@ def create_pointcloud_app(
                         frame_id,
                         semantic_cloud,
                         target_camera_m=target,
+                        point_slot=point_slot,
                     )
                 )
             else:
@@ -387,6 +389,7 @@ def create_pointcloud_app(
                 target_adjustment_camera_m=body.get(
                     "target_adjustment_camera_m"
                 ),
+                point_slot=point_slot,
             )
         except KeyError as exc:
             raise HTTPException(

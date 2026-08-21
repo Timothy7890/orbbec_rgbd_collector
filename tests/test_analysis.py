@@ -631,7 +631,8 @@ class AnalysisTests(unittest.TestCase):
             self.assertAlmostEqual(relative["x_m"], 0.02)
             self.assertAlmostEqual(relative["y_m"], -0.02)
             self.assertAlmostEqual(relative["z_m"], -0.02)
-            self.assertEqual(first["schema"], "rgbd-target-annotation/v2")
+            self.assertEqual(first["schema"], "rgbd-target-annotation/v3")
+            self.assertEqual(first["points"]["1"]["target_camera_m"], [0.1, 0.2, 0.95])
             self.assertEqual(
                 first["target_adjustment_wall_m"],
                 {"x_m": 0.001, "y_m": 0.003, "z_m": 0.002},
@@ -649,10 +650,32 @@ class AnalysisTests(unittest.TestCase):
                 frame_id,
                 target_camera_m=[0.2, 0.2, 0.95],
                 plane=plane,
+                point_slot=2,
             )
             records = load_annotations(root, session.session_id)
             self.assertEqual(len(records), 1)
-            self.assertEqual(records[0]["target_camera_m"], [0.2, 0.2, 0.95])
+            self.assertEqual(records[0]["active_point_slot"], 2)
+            self.assertEqual(
+                records[0]["points"]["1"]["target_camera_m"],
+                [0.1, 0.2, 0.95],
+            )
+            self.assertEqual(
+                records[0]["points"]["2"]["target_camera_m"],
+                [0.2, 0.2, 0.95],
+            )
+            save_annotation(
+                root,
+                session.session_id,
+                frame_id,
+                target_camera_m=[0.3, 0.2, 0.95],
+                plane=plane,
+            )
+            records = load_annotations(root, session.session_id)
+            self.assertEqual(
+                records[0]["points"]["1"]["target_camera_m"],
+                [0.3, 0.2, 0.95],
+            )
+            self.assertIn("2", records[0]["points"])
 
     def test_target_plane_coordinates_validates_target(self) -> None:
         plane = {
@@ -664,6 +687,47 @@ class AnalysisTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             target_plane_coordinates([0.0, float("nan"), 1.0], plane)
+
+    def test_legacy_annotation_becomes_point_slot_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = DatasetSession(root, "legacy points", camera_metadata())
+            frame_id = session.enqueue(make_frame(1), "manual")
+            session.close()
+            plane = {
+                "origin_camera_m": [0.0, 0.0, 1.0],
+                "normal_camera": [0.0, 0.0, 1.0],
+                "x_axis_camera": [1.0, 0.0, 0.0],
+                "y_axis_camera": [0.0, 0.0, 1.0],
+                "z_axis_camera": [0.0, -1.0, 0.0],
+            }
+            legacy = {
+                "schema": "rgbd-target-annotation/v2",
+                "session_id": session.session_id,
+                "frame_id": frame_id,
+                "target_camera_m": [0.1, 0.2, 0.95],
+                "selection_source": "pointcloud",
+                "plane": plane,
+                "yolo": {"available": False, "boxes": []},
+            }
+            (session.path / "annotations.jsonl").write_text(
+                json.dumps(legacy) + "\n", encoding="utf-8"
+            )
+            saved = save_annotation(
+                root,
+                session.session_id,
+                frame_id,
+                target_camera_m=[0.3, 0.2, 0.95],
+                plane=plane,
+                point_slot=2,
+            )
+
+        self.assertEqual(
+            saved["points"]["1"]["target_camera_m"], [0.1, 0.2, 0.95]
+        )
+        self.assertEqual(
+            saved["points"]["2"]["target_camera_m"], [0.3, 0.2, 0.95]
+        )
 
     def test_two_points_calibrate_and_persist_wall_frame(self) -> None:
         plane = {
@@ -950,12 +1014,21 @@ class AnalysisTests(unittest.TestCase):
                 self.assertEqual(saved["xyz_camera_m"].shape, (3, 3))
                 self.assertEqual(saved["xyz_wall_m"].shape, (3, 3))
                 self.assertEqual(saved["rgb"].dtype, np.uint8)
+            save_highest_confidence_semantic_pointcloud(
+                root,
+                session.session_id,
+                frame_id,
+                semantic_cloud,
+                target_camera_m=[0.2, 0.2, 1.0],
+                point_slot=2,
+            )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["selection"], "highest-confidence-only")
         self.assertEqual(metadata["detection"]["conf"], 0.95)
         self.assertEqual(metadata["point_count"], 3)
         self.assertIn("target_minus_semantic_centroid_wall_m", metadata)
+        self.assertEqual(set(metadata["targets"]), {"1", "2"})
 
 
 if __name__ == "__main__":

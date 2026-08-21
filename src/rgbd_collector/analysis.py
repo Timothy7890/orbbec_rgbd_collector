@@ -1664,6 +1664,7 @@ def save_highest_confidence_semantic_pointcloud(
     semantic_cloud: dict[str, Any],
     *,
     target_camera_m: list[float] | None = None,
+    point_slot: int = 1,
 ) -> dict[str, Any]:
     root = data_root.expanduser().resolve()
     _, frame_dir = resolve_frame_paths(root, session_id, frame_id)
@@ -1683,6 +1684,8 @@ def save_highest_confidence_semantic_pointcloud(
         or xyz_camera.shape[0] < 3
     ):
         raise ValueError("YOLO 语义点云数组无效")
+    if not 1 <= point_slot <= 9:
+        raise ValueError("point_slot 必须在 1~9")
     target: np.ndarray | None = None
     if target_camera_m is not None:
         target = np.asarray(target_camera_m, dtype=np.float64)
@@ -1693,6 +1696,16 @@ def save_highest_confidence_semantic_pointcloud(
     output_dir.mkdir(parents=True, exist_ok=True)
     data_path = output_dir / f"{frame_id}.npz"
     metadata_path = output_dir / f"{frame_id}.json"
+    saved_targets: dict[str, Any] = {}
+    if metadata_path.is_file():
+        try:
+            existing_metadata = json.loads(
+                metadata_path.read_text(encoding="utf-8")
+            )
+            if isinstance(existing_metadata.get("targets"), dict):
+                saved_targets.update(existing_metadata["targets"])
+        except (OSError, ValueError, json.JSONDecodeError):
+            saved_targets = {}
     fd, temporary_data = tempfile.mkstemp(
         prefix=".yolo-pointcloud-", suffix=".npz", dir=output_dir
     )
@@ -1736,22 +1749,44 @@ def save_highest_confidence_semantic_pointcloud(
             "rgb": {"shape": list(rgb.shape), "dtype": "uint8"},
         },
     }
+    origin = np.asarray(
+        semantic_cloud["coordinate_origin_camera_m"], dtype=np.float64
+    )
+    axes = np.asarray(
+        semantic_cloud["coordinate_axes_camera"], dtype=np.float64
+    )
+    centroid_wall = np.asarray(
+        semantic_cloud["centroid_wall_m"], dtype=np.float64
+    )
+    for saved_slot, saved_target in list(saved_targets.items()):
+        saved_camera = np.asarray(
+            saved_target.get("target_camera_m"), dtype=np.float64
+        )
+        if saved_camera.shape != (3,) or not np.isfinite(saved_camera).all():
+            saved_targets.pop(saved_slot)
+            continue
+        saved_wall = (saved_camera - origin) @ axes.T
+        saved_target["target_wall_m"] = saved_wall.tolist()
+        saved_target["target_minus_semantic_centroid_wall_m"] = (
+            saved_wall - centroid_wall
+        ).tolist()
     if target is not None:
-        origin = np.asarray(
-            semantic_cloud["coordinate_origin_camera_m"], dtype=np.float64
-        )
-        axes = np.asarray(
-            semantic_cloud["coordinate_axes_camera"], dtype=np.float64
-        )
         target_wall = (target - origin) @ axes.T
-        centroid_wall = np.asarray(
-            semantic_cloud["centroid_wall_m"], dtype=np.float64
-        )
         summary["target_camera_m"] = target.tolist()
         summary["target_wall_m"] = target_wall.tolist()
         summary["target_minus_semantic_centroid_wall_m"] = (
             target_wall - centroid_wall
         ).tolist()
+        saved_targets[str(point_slot)] = {
+            "point_slot": point_slot,
+            "target_camera_m": target.tolist(),
+            "target_wall_m": target_wall.tolist(),
+            "target_minus_semantic_centroid_wall_m": (
+                target_wall - centroid_wall
+            ).tolist(),
+        }
+    summary["active_point_slot"] = point_slot
+    summary["targets"] = saved_targets
 
     payload = json.dumps(
         summary, ensure_ascii=False, indent=2, sort_keys=True
@@ -1803,6 +1838,7 @@ def save_annotation(
     target_pixel: dict[str, Any] | None = None,
     selection_source: str = "pointcloud",
     target_adjustment_camera_m: list[float] | None = None,
+    point_slot: int = 1,
 ) -> dict[str, Any]:
     _, frame_dir = resolve_frame_paths(data_root, session_id, frame_id)
     if not frame_dir.is_dir():
@@ -1814,17 +1850,18 @@ def save_annotation(
         raise ValueError("目标点深度必须大于零")
     if selection_source not in {"pointcloud", "rgb"}:
         raise ValueError("selection_source 必须是 pointcloud 或 rgb")
+    if not 1 <= point_slot <= 9:
+        raise ValueError("point_slot 必须在 1~9")
     adjustment = np.asarray(
         target_adjustment_camera_m or [0.0, 0.0, 0.0], dtype=np.float64
     )
     if adjustment.shape != (3,) or not np.isfinite(adjustment).all():
         raise ValueError("目标微调量必须是三个有限数值")
 
-    record = {
-        "schema": "rgbd-target-annotation/v2",
-        "session_id": session_id,
-        "frame_id": frame_id,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+    updated_at = datetime.now(timezone.utc).isoformat()
+    point_record: dict[str, Any] = {
+        "point_slot": point_slot,
+        "updated_at": updated_at,
         "target_camera_m": target.tolist(),
         "target_adjustment_camera_m": adjustment.tolist(),
         "target_adjustment_wall_m": _vector_wall_coordinates(adjustment, plane),
@@ -1832,15 +1869,14 @@ def save_annotation(
         "target_plane_coordinates_m": target_plane_coordinates(
             target.tolist(), plane
         ),
-        "plane": plane,
-        "yolo": yolo or {"available": False, "boxes": []},
     }
     if target_pixel is not None:
-        record["target_pixel"] = {
+        point_record["target_pixel"] = {
             "u": int(target_pixel["u"]),
             "v": int(target_pixel["v"]),
         }
-    clusters = record["yolo"].get("clusters", [])
+    yolo_record = yolo or {"available": False, "boxes": []}
+    clusters = yolo_record.get("clusters", [])
     if clusters:
         reference = min(
             clusters,
@@ -1855,13 +1891,52 @@ def save_annotation(
             reference["centroid_camera_m"], dtype=np.float64
         )
         delta = target - reference_point
-        record["semantic_reference"] = reference
-        record["target_relative_to_semantic_m"] = _vector_wall_coordinates(
-            delta, plane
+        point_record["semantic_reference"] = reference
+        point_record["target_relative_to_semantic_m"] = (
+            _vector_wall_coordinates(delta, plane)
         )
 
     path = _annotation_path(data_root, session_id)
     records = load_annotations(data_root, session_id)
+    existing = next(
+        (item for item in records if item.get("frame_id") == frame_id),
+        None,
+    )
+    points: dict[str, Any] = {}
+    if existing is not None:
+        existing_points = existing.get("points")
+        if isinstance(existing_points, dict):
+            points.update(existing_points)
+        elif existing.get("target_camera_m") is not None:
+            legacy_keys = (
+                "updated_at",
+                "target_camera_m",
+                "target_adjustment_camera_m",
+                "target_adjustment_wall_m",
+                "selection_source",
+                "target_plane_coordinates_m",
+                "target_pixel",
+                "semantic_reference",
+                "target_relative_to_semantic_m",
+            )
+            legacy_point = {
+                key: existing[key] for key in legacy_keys if key in existing
+            }
+            legacy_point["point_slot"] = 1
+            points["1"] = legacy_point
+    points[str(point_slot)] = point_record
+
+    record = {
+        "schema": "rgbd-target-annotation/v3",
+        "session_id": session_id,
+        "frame_id": frame_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "active_point_slot": point_slot,
+        "points": points,
+        "plane": plane,
+        "yolo": yolo_record,
+    }
+    record.update(point_record)
     records = [item for item in records if item.get("frame_id") != frame_id]
     records.append(record)
     records.sort(key=lambda item: str(item.get("frame_id", "")))

@@ -218,7 +218,7 @@ def reconstruct_frame(
     stride: int = 2,
     min_depth_m: float = 0.1,
     max_depth_m: float = 5.0,
-    max_points: int = 200_000,
+    max_points: int = 1_000_000,
     boxes: list[dict[str, Any]] | None = None,
     include_pixels: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -496,6 +496,6 @@ def encode_point_cloud(points: np.ndarray) -> bytes:
 
 
 def suggested_stride(
-    width: int, height: int, max_points: int = 200_000
+    width: int, height: int, max_points: int = 1_000_000
 ) -> int:
     return max(1, int(math.ceil(math.sqrt(width * height / max_points))))

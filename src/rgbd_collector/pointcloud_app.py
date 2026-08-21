@@ -116,7 +116,7 @@ def create_pointcloud_app(
         stride: int = Query(default=1, ge=1, le=64),
         min_depth_m: float = Query(default=0.1, ge=0.0, le=99.0),
         max_depth_m: float = Query(default=5.0, gt=0.0, le=100.0),
-        max_points: int = Query(default=200_000, ge=1_000, le=1_000_000),
+        max_points: int = Query(default=1_000_000, ge=1_000, le=1_000_000),
         semantic: bool = Query(default=False),
         planes: bool = Query(default=False),
         plane_threshold_m: float = Query(default=0.008, ge=0.001, le=0.05),
@@ -208,7 +208,7 @@ def create_pointcloud_app(
                 min_depth_m=float(options.get("min_depth_m", 0.15)),
                 max_depth_m=float(options.get("max_depth_m", 3.0)),
                 stride=int(options.get("stride", 3)),
-                max_points=int(options.get("max_points", 120_000)),
+                max_points=int(options.get("max_points", 1_000_000)),
                 min_plane_points=int(options.get("min_plane_points", 300)),
                 include_plane_debug=bool(
                     options.get("include_plane_debug", False)
@@ -257,7 +257,7 @@ def create_pointcloud_app(
                 min_depth_m=float(body.get("min_depth_m", 0.15)),
                 max_depth_m=float(body.get("max_depth_m", 3.0)),
                 stride=int(body.get("stride", 3)),
-                max_points=int(body.get("max_points", 120_000)),
+                max_points=int(body.get("max_points", 1_000_000)),
                 min_plane_points=int(body.get("min_plane_points", 300)),
                 use_saved_wall_calibration=False,
             )
@@ -353,7 +353,7 @@ def create_pointcloud_app(
                 min_depth_m=float(body.get("min_depth_m", 0.15)),
                 max_depth_m=float(body.get("max_depth_m", 3.0)),
                 stride=int(body.get("stride", 3)),
-                max_points=int(body.get("max_points", 120_000)),
+                max_points=int(body.get("max_points", 1_000_000)),
                 min_plane_points=int(body.get("min_plane_points", 300)),
             )
             record = save_annotation(

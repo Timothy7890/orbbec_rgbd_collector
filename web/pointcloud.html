@@ -202,7 +202,7 @@
           <input id="stride" type="number" min="1" max="64" value="1">
         </label>
         <label>最大点数
-          <input id="maxPoints" type="number" min="1000" max="1000000" value="200000">
+          <input id="maxPoints" type="number" min="1000" max="1000000" value="1000000">
         </label>
       </div>
       <div class="row">
@@ -238,7 +238,7 @@
       <button id="loadBtn">加载点云</button>
       <button id="analyzeBtn" class="secondary">分析 YOLO 与柜面</button>
       <button id="coordinateBtn" class="secondary" disabled>坐标系分析中…</button>
-      <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系</button>
+      <button id="acceptCoordinateBtn" class="secondary" disabled>确认并保存当前坐标系（V）</button>
       <button id="calibrateBtn" class="secondary" disabled>校准并保存坐标系（X）</button>
       <button id="rgbPickBtn" class="secondary">在 RGB 图中选点</button>
       <button id="saveBtn" class="secondary" disabled>保存当前标注（C）</button>
@@ -247,7 +247,7 @@
       <div id="analysis" class="analysis">尚未分析或点选</div>
       <div id="status" class="status"><strong>尚未加载</strong>选择会话与帧</div>
       <div class="hint">
-        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后可点击“确认并保存当前坐标系”。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
+        H/L 切换上一/下一帧；每帧会自动执行 YOLO 与墙面拟合并刷新可见坐标系，认可自动结果后按 V 确认并保存当前坐标系。手动隐藏后保持隐藏。按 X 开始/取消坐标系两点标定，按 C 保存当前标注。第一次可直接选点，之后按 R 解锁下一次选点，Esc 取消解锁；点云和 RGB 选点共用此锁。选点后左键拖动会围绕该点旋转，右键拖动平移，滚轮缩放。墙面系：A/D 左右（X−/X+），W/S 上下（Z+/Z−），Q/E 墙外/墙内（Y−/Y+）。标注保存为会话目录下的 annotations.jsonl。
       </div>
     </aside>
     <section id="stage" class="stage">
@@ -760,7 +760,7 @@
       $("acceptCoordinateBtn").disabled = !available || alreadySaved;
       $("acceptCoordinateBtn").textContent = alreadySaved
         ? "当前坐标系已保存"
-        : "确认并保存当前坐标系";
+        : "确认并保存当前坐标系（V）";
       if (!available) $("coordinateFrame").hidden = true;
     }
 
@@ -1020,7 +1020,8 @@
             `边${Number(p.axis_reference_boundary_index) + 1}，` +
             `${(p.axis_reference_line_length_m * 100).toFixed(0)} cm；` +
             `同向组 ${p.axis_reference_group_size} 个平面/` +
-            `${p.axis_reference_group_line_count} 条线）`
+            `${p.axis_reference_group_line_count} 条线；` +
+            `与相机上方向 ${p.axis_reference_camera_up_angle_deg.toFixed(1)}°）`
           );
         else if (p.axis_estimation === "secondary-plane-principal-axis")
           lines.push(`坐标系来源: 1·自动窄平面长轴（平面 ${p.axis_reference_plane_index}，长宽比 ${p.axis_shape_anisotropy.toFixed(2)}）`);
@@ -1471,6 +1472,14 @@
       if (event.code === "KeyC") {
         if (!event.repeat)
           saveCurrentAnnotation().catch(error => setStatus(error.message, true));
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "KeyV") {
+        if (!event.repeat)
+          acceptCurrentCoordinate().catch(error =>
+            setStatus(error.message, true)
+          );
         event.preventDefault();
         return;
       }

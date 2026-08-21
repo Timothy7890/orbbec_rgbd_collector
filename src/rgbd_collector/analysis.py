@@ -742,10 +742,12 @@ def estimate_wall_x_from_p0_boundary_lines(
     min_group_line_length_m: float = 0.10,
     min_group_relative_length: float = 0.25,
     min_distinct_planes: int = 2,
+    min_camera_up_line_angle_deg: float = 45.0,
 ) -> dict[str, Any]:
     result = dict(fitted_plane)
     wall_y = np.asarray(result["y_axis_camera"], dtype=np.float64)
     wall_y /= np.linalg.norm(wall_y)
+    camera_up = np.array([0.0, -1.0, 0.0])
     candidates: list[
         tuple[float, np.ndarray, dict[str, Any], dict[str, Any]]
     ] = []
@@ -753,6 +755,7 @@ def estimate_wall_x_from_p0_boundary_lines(
         for line in segment.get("boundary_lines", []):
             line["selected_for_x"] = False
             line["accepted_for_x_group"] = False
+            line["passes_camera_up_angle"] = False
             length = float(line.get("length_m", 0.0))
             direction = np.asarray(
                 line.get("direction_camera"), dtype=np.float64
@@ -761,12 +764,30 @@ def estimate_wall_x_from_p0_boundary_lines(
                 continue
             direction -= np.dot(direction, wall_y) * wall_y
             direction_length = np.linalg.norm(direction)
+            if direction_length >= 1e-6:
+                direction /= direction_length
+                camera_up_angle_deg = float(
+                    np.degrees(
+                        np.arccos(
+                            np.clip(
+                                abs(float(direction @ camera_up)),
+                                0.0,
+                                1.0,
+                            )
+                        )
+                    )
+                )
+                line["camera_up_line_angle_deg"] = camera_up_angle_deg
+                line["passes_camera_up_angle"] = (
+                    camera_up_angle_deg >= min_camera_up_line_angle_deg
+                )
             if (
                 length >= min_group_line_length_m
                 and direction_length >= 1e-6
+                and line["passes_camera_up_angle"]
             ):
                 candidates.append(
-                    (length, direction / direction_length, segment, line)
+                    (length, direction, segment, line)
                 )
     if not candidates:
         return result
@@ -847,7 +868,6 @@ def estimate_wall_x_from_p0_boundary_lines(
     wall_x /= wall_x_length
     wall_z = np.cross(wall_x, wall_y)
     wall_z /= np.linalg.norm(wall_z)
-    camera_up = np.array([0.0, -1.0, 0.0])
     if np.dot(wall_z, camera_up) < 0:
         wall_x = -wall_x
         wall_z = -wall_z
@@ -872,6 +892,12 @@ def estimate_wall_x_from_p0_boundary_lines(
     )
     result["axis_reference_group_angle_tolerance_deg"] = (
         max_direction_angle_deg
+    )
+    result["axis_reference_camera_up_angle_deg"] = float(
+        selected_line["camera_up_line_angle_deg"]
+    )
+    result["axis_reference_min_camera_up_angle_deg"] = (
+        min_camera_up_line_angle_deg
     )
     result["automatic_x_line_start_camera_m"] = line_start.tolist()
     result["automatic_x_line_end_camera_m"] = line_end.tolist()
@@ -1052,7 +1078,7 @@ def analyze_frame(
     min_depth_m: float = 0.15,
     max_depth_m: float = 3.0,
     stride: int = 3,
-    max_points: int = 120_000,
+    max_points: int = 1_000_000,
     min_plane_points: int = 300,
     use_saved_wall_calibration: bool = True,
     include_plane_debug: bool = False,
@@ -1393,6 +1419,8 @@ def build_accepted_wall_calibration(
         "axis_reference_group_line_count",
         "axis_reference_group_total_length_m",
         "axis_reference_group_angle_tolerance_deg",
+        "axis_reference_camera_up_angle_deg",
+        "axis_reference_min_camera_up_angle_deg",
     ):
         if key in plane:
             calibration[key] = plane[key]
@@ -1527,6 +1555,8 @@ def apply_wall_calibration(
         "axis_reference_group_line_count",
         "axis_reference_group_total_length_m",
         "axis_reference_group_angle_tolerance_deg",
+        "axis_reference_camera_up_angle_deg",
+        "axis_reference_min_camera_up_angle_deg",
     ):
         if key in calibration:
             calibrated[key] = calibration[key]

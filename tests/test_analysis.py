@@ -432,6 +432,52 @@ class AnalysisTests(unittest.TestCase):
             segments[4]["boundary_lines"][0]["accepted_for_x_group"]
         )
 
+    def test_direction_group_rejects_lines_close_to_camera_up(self) -> None:
+        def boundary(
+            length: float, direction: list[float]
+        ) -> dict[str, object]:
+            vector = np.asarray(direction, dtype=np.float64)
+            vector /= np.linalg.norm(vector)
+            return {
+                "index": 0,
+                "start_camera_m": (-0.5 * length * vector).tolist(),
+                "end_camera_m": (0.5 * length * vector).tolist(),
+                "direction_camera": vector.tolist(),
+                "length_m": length,
+                "fit_method": "ransac",
+            }
+
+        segments = [
+            {"index": 0, "boundary_lines": []},
+            {"index": 1, "boundary_lines": [boundary(2.0, [0.0, 1.0, 0.0])]},
+            {"index": 2, "boundary_lines": [boundary(1.8, [0.0, 1.0, 0.0])]},
+            {"index": 3, "boundary_lines": [boundary(0.8, [1.0, 0.0, 0.0])]},
+            {
+                "index": 4,
+                "boundary_lines": [boundary(0.7, [1.0, 0.01, 0.0])],
+            },
+        ]
+        fitted = estimate_wall_x_from_p0_boundary_lines(
+            {
+                "x_axis_camera": [1.0, 0.0, 0.0],
+                "y_axis_camera": [0.0, 0.0, 1.0],
+                "z_axis_camera": [0.0, -1.0, 0.0],
+                "axis_estimation": "camera-up-projection",
+            },
+            segments,
+        )
+
+        self.assertEqual(fitted["axis_reference_plane_index"], 3)
+        self.assertGreaterEqual(
+            fitted["axis_reference_camera_up_angle_deg"], 45.0
+        )
+        self.assertFalse(
+            segments[1]["boundary_lines"][0]["passes_camera_up_angle"]
+        )
+        self.assertFalse(
+            segments[2]["boundary_lines"][0]["accepted_for_x_group"]
+        )
+
     def test_plane_intersection_defines_automatic_wall_x(self) -> None:
         fitted = {
             "origin_camera_m": [0.0, 0.0, 1.0],

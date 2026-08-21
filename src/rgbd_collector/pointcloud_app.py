@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -13,6 +15,7 @@ from .analysis import (
     build_wall_calibration,
     load_annotations,
     load_wall_calibration,
+    reproject_semantic_pointcloud,
     save_annotation,
     save_highest_confidence_semantic_pointcloud,
     save_wall_calibration,
@@ -40,6 +43,7 @@ def create_pointcloud_app(
     root = data_root.expanduser().resolve()
     detector = yolo or OfflineYolo()
     app = FastAPI(title="Captured RGB-D Point Cloud Viewer")
+    analysis_cache: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
     @app.get("/")
     def index():
@@ -214,7 +218,19 @@ def create_pointcloud_app(
                 include_plane_debug=bool(
                     options.get("include_plane_debug", False)
                 ),
+                include_highest_confidence_semantic_cloud=True,
             )
+            semantic_cloud = result.pop(
+                "_highest_confidence_semantic_cloud", None
+            )
+            cache_key = (session_id, frame_id)
+            analysis_cache[cache_key] = {
+                "semantic_cloud": semantic_cloud,
+                "yolo": copy.deepcopy(result["yolo"]),
+            }
+            analysis_cache.move_to_end(cache_key)
+            while len(analysis_cache) > 32:
+                analysis_cache.popitem(last=False)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
@@ -339,29 +355,46 @@ def create_pointcloud_app(
         try:
             target = [float(value) for value in body["target_camera_m"]]
             point_slot = int(body.get("point_slot", 1))
-            boxes = (
-                detector.infer_frame(root, session_id, frame_id)
-                if detector.enabled
-                else None
-            )
-            analysis = analyze_frame(
-                root,
-                session_id,
-                frame_id,
-                boxes=boxes,
-                plane_threshold_m=float(
-                    body.get("plane_threshold_m", 0.008)
-                ),
-                min_depth_m=float(body.get("min_depth_m", 0.15)),
-                max_depth_m=float(body.get("max_depth_m", 3.0)),
-                stride=int(body.get("stride", 3)),
-                max_points=int(body.get("max_points", 1_000_000)),
-                min_plane_points=int(body.get("min_plane_points", 300)),
-                include_highest_confidence_semantic_cloud=True,
-            )
-            semantic_cloud = analysis.pop(
-                "_highest_confidence_semantic_cloud", None
-            )
+            cache_key = (session_id, frame_id)
+            cached = analysis_cache.get(cache_key)
+            submitted_plane = body.get("plane")
+            if cached is not None and isinstance(submitted_plane, dict):
+                analysis_cache.move_to_end(cache_key)
+                analysis = {
+                    "plane": dict(submitted_plane),
+                    "yolo": copy.deepcopy(cached["yolo"]),
+                }
+                semantic_cloud = cached["semantic_cloud"]
+                if semantic_cloud is not None:
+                    semantic_cloud = reproject_semantic_pointcloud(
+                        semantic_cloud, analysis["plane"]
+                    )
+            else:
+                boxes = (
+                    detector.infer_frame(root, session_id, frame_id)
+                    if detector.enabled
+                    else None
+                )
+                analysis = analyze_frame(
+                    root,
+                    session_id,
+                    frame_id,
+                    boxes=boxes,
+                    plane_threshold_m=float(
+                        body.get("plane_threshold_m", 0.008)
+                    ),
+                    min_depth_m=float(body.get("min_depth_m", 0.15)),
+                    max_depth_m=float(body.get("max_depth_m", 3.0)),
+                    stride=int(body.get("stride", 3)),
+                    max_points=int(body.get("max_points", 1_000_000)),
+                    min_plane_points=int(
+                        body.get("min_plane_points", 300)
+                    ),
+                    include_highest_confidence_semantic_cloud=True,
+                )
+                semantic_cloud = analysis.pop(
+                    "_highest_confidence_semantic_cloud", None
+                )
             if semantic_cloud is not None:
                 analysis["yolo"]["saved_pointcloud"] = (
                     save_highest_confidence_semantic_pointcloud(

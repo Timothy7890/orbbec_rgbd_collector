@@ -1014,6 +1014,7 @@ class AnalysisTests(unittest.TestCase):
                 self.assertEqual(saved["xyz_camera_m"].shape, (3, 3))
                 self.assertEqual(saved["xyz_wall_m"].shape, (3, 3))
                 self.assertEqual(saved["rgb"].dtype, np.uint8)
+            data_mtime_ns = data_path.stat().st_mtime_ns
             save_highest_confidence_semantic_pointcloud(
                 root,
                 session.session_id,
@@ -1022,6 +1023,7 @@ class AnalysisTests(unittest.TestCase):
                 target_camera_m=[0.2, 0.2, 1.0],
                 point_slot=2,
             )
+            self.assertEqual(data_path.stat().st_mtime_ns, data_mtime_ns)
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["selection"], "highest-confidence-only")

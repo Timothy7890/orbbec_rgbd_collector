@@ -1316,6 +1316,34 @@ def highest_confidence_semantic_pointcloud(
     }
 
 
+def reproject_semantic_pointcloud(
+    semantic_cloud: dict[str, Any],
+    plane: dict[str, Any],
+) -> dict[str, Any]:
+    xyz_camera = np.asarray(
+        semantic_cloud["xyz_camera_m"], dtype=np.float32
+    )
+    origin = np.asarray(plane["origin_camera_m"], dtype=np.float64)
+    wall_x, wall_y, wall_z = _wall_axes(plane)
+    axes = np.asarray((wall_x, wall_y, wall_z), dtype=np.float64)
+    if (
+        xyz_camera.ndim != 2
+        or xyz_camera.shape[1] != 3
+        or origin.shape != (3,)
+        or axes.shape != (3, 3)
+        or not np.isfinite(origin).all()
+        or not np.isfinite(axes).all()
+    ):
+        raise ValueError("无法使用当前坐标系转换 YOLO 点云")
+    xyz_wall = (xyz_camera - origin) @ axes.T
+    projected = dict(semantic_cloud)
+    projected["xyz_wall_m"] = xyz_wall.astype(np.float32, copy=False)
+    projected["centroid_wall_m"] = np.median(xyz_wall, axis=0).tolist()
+    projected["coordinate_origin_camera_m"] = origin.tolist()
+    projected["coordinate_axes_camera"] = axes.tolist()
+    return projected
+
+
 def _semantic_projection(
     points: np.ndarray,
     metadata: dict[str, Any],
@@ -1697,6 +1725,7 @@ def save_highest_confidence_semantic_pointcloud(
     data_path = output_dir / f"{frame_id}.npz"
     metadata_path = output_dir / f"{frame_id}.json"
     saved_targets: dict[str, Any] = {}
+    existing_metadata: dict[str, Any] = {}
     if metadata_path.is_file():
         try:
             existing_metadata = json.loads(
@@ -1706,23 +1735,53 @@ def save_highest_confidence_semantic_pointcloud(
                 saved_targets.update(existing_metadata["targets"])
         except (OSError, ValueError, json.JSONDecodeError):
             saved_targets = {}
-    fd, temporary_data = tempfile.mkstemp(
-        prefix=".yolo-pointcloud-", suffix=".npz", dir=output_dir
+            existing_metadata = {}
+    point_data_unchanged = (
+        data_path.is_file()
+        and existing_metadata.get("detection") == semantic_cloud["detection"]
+        and int(existing_metadata.get("point_count", -1))
+        == int(xyz_camera.shape[0])
+        and np.allclose(
+            np.asarray(
+                existing_metadata.get("coordinate_origin_camera_m"),
+                dtype=np.float64,
+            ),
+            np.asarray(
+                semantic_cloud["coordinate_origin_camera_m"],
+                dtype=np.float64,
+            ),
+            atol=1e-6,
+        )
+        and np.allclose(
+            np.asarray(
+                existing_metadata.get("coordinate_axes_camera"),
+                dtype=np.float64,
+            ),
+            np.asarray(
+                semantic_cloud["coordinate_axes_camera"],
+                dtype=np.float64,
+            ),
+            atol=1e-6,
+        )
     )
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            np.savez_compressed(
-                handle,
-                xyz_camera_m=xyz_camera,
-                xyz_wall_m=xyz_wall,
-                rgb=rgb,
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_data, data_path)
-    finally:
-        if os.path.exists(temporary_data):
-            os.unlink(temporary_data)
+    if not point_data_unchanged:
+        fd, temporary_data = tempfile.mkstemp(
+            prefix=".yolo-pointcloud-", suffix=".npz", dir=output_dir
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    xyz_camera_m=xyz_camera,
+                    xyz_wall_m=xyz_wall,
+                    rgb=rgb,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_data, data_path)
+        finally:
+            if os.path.exists(temporary_data):
+                os.unlink(temporary_data)
 
     summary: dict[str, Any] = {
         "schema": "rgbd-yolo-semantic-pointcloud/v1",
